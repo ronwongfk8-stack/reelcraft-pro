@@ -23,7 +23,7 @@ interface PricingModalProps {
   totalAvailable: number;
   onCreditsUpdated: (account: UserCreditAccount, totalAvailable: number) => void;
   isLowBalanceNotice?: boolean;
-  onBeforeCheckout?: () => void;
+  onBeforeCheckout?: () => void | Promise<void>;
 }
 
 export const PricingModal: React.FC<PricingModalProps> = ({
@@ -57,7 +57,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({
     // — that navigation wipes all in-memory React state (photos, captions,
     // styling), so save a snapshot right before leaving to make sure it's
     // there when the user returns.
-    onBeforeCheckout?.();
+    await onBeforeCheckout?.();
 
     // This only asks the backend to create a Stripe Checkout Session and
     // hands back Stripe's own hosted payment page URL — no card details

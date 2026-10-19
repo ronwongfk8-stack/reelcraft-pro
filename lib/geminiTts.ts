@@ -81,28 +81,52 @@ export async function synthesizeGeminiVoiceover({ text, voice }: SynthesizeParam
   // only the instructed speech, it doesn't read the instruction aloud.
   const styledText = `Say the following in a ${voice.tone.toLowerCase()} voice: ${text}`;
 
-  const response = await ai.models.generateContent({
-    model: 'models/gemini-2.5-flash-preview-tts',
-    contents: [{ parts: [{ text: styledText }] }],
-    config: {
-      responseModalities: ['AUDIO'],
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName },
-        },
-      },
-    },
-  } as any);
+  // Gemini's preview TTS model occasionally answers with no audio (or a transient 5xx/429). A couple of quick
+  // retries makes that invisible to the user instead of surfacing as an error.
+  const MAX_ATTEMPTS = 3;
+  let inlineData: { data?: string; mimeType?: string } | undefined;
+  let lastError: Error | null = null;
 
-  const inlineData = (response as any)?.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS && !inlineData?.data; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'models/gemini-2.5-flash-preview-tts',
+        contents: [{ parts: [{ text: styledText }] }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName },
+            },
+          },
+        },
+      } as any);
+
+      const parts: any[] = (response as any)?.candidates?.[0]?.content?.parts || [];
+      inlineData = parts.find((p) => p?.inlineData?.data)?.inlineData;
+      if (!inlineData?.data) {
+        const reason = (response as any)?.candidates?.[0]?.finishReason;
+        lastError = new Error(`Gemini TTS returned no audio data${reason ? ` (finishReason: ${reason})` : ''}.`);
+      }
+    } catch (err: any) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const transient = /429|500|503|UNAVAILABLE|INTERNAL|RESOURCE_EXHAUSTED|fetch failed|timeout/i.test(lastError.message);
+      if (!transient) break;
+    }
+    if (!inlineData?.data && attempt < MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 600 * attempt));
+    }
+  }
+
   const base64Pcm = inlineData?.data;
 
   if (!base64Pcm) {
-    throw new Error('Gemini TTS returned no audio data.');
+    throw lastError || new Error('Gemini TTS returned no audio data.');
   }
 
   const pcmBuffer = Buffer.from(base64Pcm, 'base64');
-  const wavBuffer = pcmToWav(pcmBuffer);
+  const rateMatch = /rate=(\d+)/i.exec(inlineData?.mimeType || '');
+  const wavBuffer = pcmToWav(pcmBuffer, rateMatch ? parseInt(rateMatch[1], 10) : 24000);
 
   return {
     audioBase64: wavBuffer.toString('base64'),

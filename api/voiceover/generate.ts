@@ -37,14 +37,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (err: any) {
     console.error('Voiceover generation failed:', err.message);
     const isConfigError = err.message?.includes('not configured');
-    // TEMPORARY: surfacing the real error message to the client for
-    // debugging, since Vercel's log dashboard hasn't been showing it
-    // reliably. Revert this to the generic message once the root cause is
-    // found — error details shouldn't normally reach the client.
+    // Error details only reach the browser when DEBUG_TTS=1 is set in Vercel's environment variables
+    // (turn it on temporarily when investigating, then remove it - stack traces shouldn't be public).
+    const debug = process.env.DEBUG_TTS === '1';
     res.status(isConfigError ? 503 : 500).json({
       success: false,
-      error: err.message || 'Unable to generate voiceover. Please try again.',
-      debugStack: err.stack,
+      error: debug || isConfigError ? err.message || 'Unable to generate voiceover.' : 'Unable to generate voiceover right now. Please try again in a moment.',
+      ...(debug ? { debugStack: err.stack } : {}),
     });
   }
 }
