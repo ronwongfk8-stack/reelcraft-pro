@@ -1,5 +1,5 @@
-import React, { useRef } from 'react';
-import { Upload, Image as ImageIcon, Video, Trash2, Plus, Film } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Upload, Image as ImageIcon, Video, Trash2, Plus, Film, ClipboardPaste } from 'lucide-react';
 import { MediaItem } from '../types';
 
 interface MediaUploaderProps {
@@ -8,75 +8,158 @@ interface MediaUploaderProps {
   onRemoveMedia: (id: string) => void;
 }
 
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
+const PASTE_SHORTCUT = isMac ? '⌘V' : 'Ctrl+V';
+
+const extensionFor = (mime: string) => {
+  const ext = (mime.split('/')[1] || 'png').split('+')[0].replace('jpeg', 'jpg');
+  return ext || 'png';
+};
+
 const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
   mediaItems,
   onAddMedia,
   onRemoveMedia,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [flash, setFlash] = useState<{ kind: 'ok' | 'info'; text: string } | null>(null);
+  const flashTimer = useRef<any>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  // The paste listener is registered once, so it must always call the LATEST onAddMedia
+  // (the parent recreates it on every render because it closes over the current media list).
+  const onAddMediaRef = useRef(onAddMedia);
+  onAddMediaRef.current = onAddMedia;
 
+  const showFlash = (kind: 'ok' | 'info', text: string) => {
+    setFlash({ kind, text });
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlash(null), 4000);
+  };
+
+  useEffect(() => () => flashTimer.current && clearTimeout(flashTimer.current), []);
+
+  /** One path for every way media arrives: file picker, drag & drop, and clipboard paste. */
+  const addFiles = (files: File[], source: 'picker' | 'drop' | 'paste') => {
+    const stamp = Date.now();
+    const time = new Date(stamp).toTimeString().slice(0, 8).replace(/:/g, '-');
     const newItems: MediaItem[] = [];
 
-    Array.from(files as FileList).forEach((file: File, index: number) => {
+    files.forEach((file, index) => {
       const isVideo = file.type.startsWith('video');
       const isImage = file.type.startsWith('image');
       if (!isImage && !isVideo) return;
 
-      const url = URL.createObjectURL(file);
-      const id = `upload-${Date.now()}-${index}`;
+      // Screenshots are always called "image.png" by the browser - give pasted ones a unique readable name.
+      const name =
+        source === 'paste' && (!file.name || /^image\.\w+$/i.test(file.name) || /^clipboard\.\w+$/i.test(file.name))
+          ? `Pasted ${isVideo ? 'video' : 'screenshot'} ${time}${files.length > 1 ? `-${index + 1}` : ''}.${extensionFor(file.type)}`
+          : file.name;
 
       newItems.push({
-        id,
-        name: file.name,
+        id: `${source === 'paste' ? 'paste' : source === 'drop' ? 'drop' : 'upload'}-${stamp}-${index}`,
+        name,
         type: isVideo ? 'video' : 'image',
-        url,
+        url: URL.createObjectURL(file),
         duration: isVideo ? 5 : 3.5,
         file,
       });
     });
 
     if (newItems.length > 0) {
-      onAddMedia(newItems);
-    }
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+      onAddMediaRef.current(newItems);
+      if (source === 'paste') {
+        showFlash('ok', `Pasted ${newItems.length} ${newItems.length === 1 ? 'image' : 'files'} from your clipboard.`);
+      }
+    } else if (source === 'paste') {
+      showFlash('info', 'The clipboard had no image or video. Copy a picture or take a screenshot first.');
     }
   };
 
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = (e.target as HTMLInputElement).files;
+    if (!files || files.length === 0) return;
+    addFiles(Array.from(files as FileList), 'picker');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
+    addFiles(Array.from(files as FileList), 'drop');
+  };
 
-    const newItems: MediaItem[] = [];
-    Array.from(files as FileList).forEach((file: File, index: number) => {
-      const isVideo = file.type.startsWith('video');
-      const isImage = file.type.startsWith('image');
-      if (!isImage && !isVideo) return;
+  // Ctrl+V / ⌘V anywhere on the page: screenshots (Win+Shift+S, PrtScn, ⌘⇧4...), images copied from a
+  // website or app, and files copied in File Explorer / Finder. Plain-text pastes are left alone, so the
+  // prompt box keeps working normally.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const data = e.clipboardData;
+      if (!data) return;
 
-      const url = URL.createObjectURL(file);
-      newItems.push({
-        id: `drop-${Date.now()}-${index}`,
-        name: file.name,
-        type: isVideo ? 'video' : 'image',
-        url,
-        duration: isVideo ? 5 : 3.5,
-        file,
-      });
-    });
+      const files: File[] = [];
+      for (const item of Array.from(data.items || [])) {
+        if (item.kind === 'file' && (item.type.startsWith('image/') || item.type.startsWith('video/'))) {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length === 0 && data.files?.length) {
+        files.push(...(Array.from(data.files) as File[]).filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/')));
+      }
+      if (files.length === 0) return; // normal text paste - do nothing
 
-    if (newItems.length > 0) {
-      onAddMedia(newItems);
+      e.preventDefault();
+      addFiles(files, 'paste');
+    };
+
+    document.addEventListener('paste', onPaste);
+    return () => document.removeEventListener('paste', onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Button for touch devices / people who prefer clicking. Needs the browser's clipboard permission,
+  // so if that isn't available we simply point to the keyboard shortcut.
+  const handlePasteButton = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      if (!navigator.clipboard || !(navigator.clipboard as any).read) throw new Error('unsupported');
+      const items: any[] = await (navigator.clipboard as any).read();
+      const files: File[] = [];
+      for (const it of items) {
+        const type = (it.types as string[]).find((t) => t.startsWith('image/'));
+        if (type) {
+          const blob: Blob = await it.getType(type);
+          files.push(new File([blob], `clipboard.${extensionFor(type)}`, { type }));
+        }
+      }
+      if (files.length === 0) {
+        showFlash('info', 'No image found on your clipboard. Copy a picture or take a screenshot first.');
+        return;
+      }
+      addFiles(files, 'paste');
+    } catch {
+      showFlash('info', `Your browser didn't allow clipboard access here. Just press ${PASTE_SHORTCUT} on this page instead.`);
     }
   };
 
+  const PasteButton = ({ className = '' }: { className?: string }) => (
+    <button
+      onClick={handlePasteButton}
+      title={`Paste an image from your clipboard (or press ${PASTE_SHORTCUT})`}
+      className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors cursor-pointer ${className}`}
+    >
+      <ClipboardPaste className="w-3.5 h-3.5 text-indigo-300" />
+      <span>Paste</span>
+    </button>
+  );
+
   return (
-    <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-xl">
+    <div
+      className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-xl"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={handleDrop}
+    >
       <input
         ref={fileInputRef}
         type="file"
@@ -86,7 +169,7 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
         className="hidden"
       />
 
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-2">
         <div className="flex items-center space-x-2">
           <Film className="w-4 h-4 text-indigo-400" />
           <h3 className="text-sm font-bold text-white">Your Media Footage</h3>
@@ -95,21 +178,35 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
           </span>
         </div>
 
-        {mediaItems.length > 0 && (
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 transition-colors cursor-pointer"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add More</span>
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <PasteButton />
+          {mediaItems.length > 0 && (
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-xs font-semibold border border-indigo-500/30 transition-colors cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add More</span>
+            </button>
+          )}
+        </div>
       </div>
+
+      {flash && (
+        <p
+          role="status"
+          className={`mb-3 text-[11px] rounded-lg px-2.5 py-1.5 border ${
+            flash.kind === 'ok'
+              ? 'text-emerald-300 bg-emerald-950/50 border-emerald-800/60'
+              : 'text-amber-300 bg-amber-950/50 border-amber-800/60'
+          }`}
+        >
+          {flash.text}
+        </p>
+      )}
 
       {mediaItems.length === 0 ? (
         <div
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
           className="flex flex-col items-center justify-center p-6 border-2 border-dashed border-slate-800 hover:border-indigo-500/60 rounded-xl bg-slate-950/40 hover:bg-slate-800/30 transition-all cursor-pointer text-center group"
         >
@@ -119,6 +216,13 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
           <p className="text-xs font-semibold text-slate-200">
             Drag & drop your photos and video clips here, or{' '}
             <span className="text-indigo-400 underline">browse files</span>
+          </p>
+          <p className="text-xs text-slate-300 mt-1.5">
+            or copy an image / screenshot and press{' '}
+            <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] font-mono text-indigo-300">
+              {PASTE_SHORTCUT}
+            </kbd>{' '}
+            to paste it
           </p>
           <p className="text-[10px] text-slate-500 mt-1">Supports JPG, PNG, WEBP, MP4, MOV, WEBM</p>
         </div>
