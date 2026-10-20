@@ -218,6 +218,7 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [assetTick, setAssetTick] = useState(0); // bump to force a redraw when images/videos/fonts become ready
+  const [brokenVideoNames, setBrokenVideoNames] = useState<string[]>([]);
   const [exportExt, setExportExt] = useState<'webm' | 'mp4'>('webm');
   const [viewW, setViewW] = useState(720); // rendered CSS width of the preview (for WYSIWYG text sizing)
   const isPlayingRef = useRef(false);
@@ -447,6 +448,7 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
         vid.playsInline = true;
         vid.preload = 'auto';
         vid.onloadeddata = () => setAssetTick((t) => t + 1);
+        vid.onerror = () => setBrokenVideoNames((prev) => (prev.includes(item.name) ? prev : [...prev, item.name]));
         vid.onseeked = () => setAssetTick((t) => t + 1);
         vid.load();
         assetCache.current.set(item.id, vid);
@@ -631,9 +633,17 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
 
         // Draw image or video frame
         if (asset instanceof HTMLVideoElement) {
-          // Keep the video frame locked to this clip's timeline position
+          // Keep the video frame locked to this clip's timeline position (respecting the trim start)
           const vDur = isFinite(asset.duration) && asset.duration > 0 ? asset.duration : 0;
-          const wanted = vDur ? clipTime % vDur : clipTime;
+          const trimStart = vDur ? Math.min(Math.max(0, clip.trimStart || 0), Math.max(0, vDur - 0.1)) : 0;
+          const span = vDur ? Math.max(0.1, vDur - trimStart) : 0;
+          const wanted = vDur ? trimStart + (clipTime % span) : clipTime;
+
+          // Original sound: off unless this clip asks for it (and the preview isn't muted)
+          const wantSound = !!clip.keepAudio && !isMuted;
+          if (clip.keepAudio) audioEngine.attachMediaElement(asset);
+          asset.muted = !wantSound;
+
           if (isPlayingRef.current) {
             if (asset.paused) asset.play().catch(() => {});
             if (vDur && Math.abs(asset.currentTime - wanted) > 0.4) asset.currentTime = wanted;
@@ -1561,6 +1571,15 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
           className="w-full h-full object-contain cursor-pointer"
           onClick={togglePlay}
         />
+
+        {brokenVideoNames.length > 0 && (
+          <div className="absolute top-2 left-2 right-2 z-30 rounded-lg bg-amber-950/95 border border-amber-600/70 text-amber-200 text-[11px] leading-snug px-3 py-2 shadow-lg">
+            <strong>"{brokenVideoNames[0]}"</strong>
+            {brokenVideoNames.length > 1 ? ` and ${brokenVideoNames.length - 1} more` : ''} can't be played by this browser
+            (common with iPhone videos in HEVC format). Re-export it as MP4 / "Most Compatible", or open ReelCraft in Safari
+            or Edge, then add it again.
+          </div>
+        )}
 
         {/* Canva-Style Interactive Text Overlay on Footage (Active when editing) */}
         {showOverlayEditor && activeOverlay && (

@@ -86,6 +86,8 @@ class WebAudioEngine {
   private musicGainNode: GainNode | null = null;
   private voiceGainNode: GainNode | null = null;
   private sfxGainNode: GainNode | null = null;
+  private videoGainNode: GainNode | null = null;
+  private routedVideos = new WeakSet<HTMLMediaElement>();
   private masterGainNode: GainNode | null = null;
   private compressorNode: DynamicsCompressorNode | null = null;
 
@@ -132,6 +134,9 @@ class WebAudioEngine {
     this.musicGainNode.connect(this.masterGainNode);
     this.voiceGainNode.connect(this.masterGainNode);
     this.sfxGainNode.connect(this.masterGainNode);
+    this.videoGainNode = this.ctx.createGain();
+    this.videoGainNode.gain.value = 1.0;
+    this.videoGainNode.connect(this.masterGainNode);
 
     // Studio-grade Brickwall Dynamics Limiter / Compressor to guarantee ZERO digital clipping
     this.compressorNode = this.ctx.createDynamicsCompressor();
@@ -146,6 +151,19 @@ class WebAudioEngine {
     this.masterGainNode.connect(this.compressorNode);
     this.compressorNode.connect(this.ctx.destination);
     this.compressorNode.connect(this.destinationStreamNode);
+  }
+
+  /** Routes a <video>'s own sound through the mix so it is heard in preview AND recorded in exports.
+   *  Only done on demand (a clip with "original sound" on); an element can only be routed once. */
+  public attachMediaElement(el: HTMLMediaElement) {
+    this.init();
+    if (!this.ctx || !this.videoGainNode || this.routedVideos.has(el)) return;
+    try {
+      this.ctx.createMediaElementSource(el).connect(this.videoGainNode);
+      this.routedVideos.add(el);
+    } catch (e) {
+      console.warn('Could not route video audio', e);
+    }
   }
 
   public getAudioStreamDestination(): MediaStreamAudioDestinationNode | null {

@@ -11,6 +11,32 @@ interface MediaUploaderProps {
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
 const PASTE_SHORTCUT = isMac ? '⌘V' : 'Ctrl+V';
 
+const LARGE_VIDEO_BYTES = 150 * 1024 * 1024;
+
+/** Loads just the metadata of a video. Returns null if the browser can't decode it. */
+const probeVideo = (url: string): Promise<{ duration: number; width: number; height: number } | null> =>
+  new Promise((resolve) => {
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.muted = true;
+    (v as any).playsInline = true;
+    let settled = false;
+    const done = (result: { duration: number; width: number; height: number } | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      v.removeAttribute('src');
+      v.load();
+      resolve(result);
+    };
+    const timer = setTimeout(() => done(null), 15000);
+    v.onloadedmetadata = () =>
+      // width 0 = no decodable picture (audio-only file, or a codec this browser can't show)
+      done(v.videoWidth > 0 ? { duration: isFinite(v.duration) ? v.duration : 0, width: v.videoWidth, height: v.videoHeight } : null);
+    v.onerror = () => done(null);
+    v.src = url;
+  });
+
 const extensionFor = (mime: string) => {
   const ext = (mime.split('/')[1] || 'png').split('+')[0].replace('jpeg', 'jpg');
   return ext || 'png';
@@ -39,15 +65,18 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
   useEffect(() => () => flashTimer.current && clearTimeout(flashTimer.current), []);
 
   /** One path for every way media arrives: file picker, drag & drop, and clipboard paste. */
-  const addFiles = (files: File[], source: 'picker' | 'drop' | 'paste') => {
+  const addFiles = async (files: File[], source: 'picker' | 'drop' | 'paste') => {
     const stamp = Date.now();
     const time = new Date(stamp).toTimeString().slice(0, 8).replace(/:/g, '-');
     const newItems: MediaItem[] = [];
+    const unreadable: string[] = [];
+    let sawLargeVideo = false;
 
-    files.forEach((file, index) => {
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
       const isVideo = file.type.startsWith('video');
       const isImage = file.type.startsWith('image');
-      if (!isImage && !isVideo) return;
+      if (!isImage && !isVideo) continue;
 
       // Screenshots are always called "image.png" by the browser - give pasted ones a unique readable name.
       const name =
@@ -55,22 +84,54 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
           ? `Pasted ${isVideo ? 'video' : 'screenshot'} ${time}${files.length > 1 ? `-${index + 1}` : ''}.${extensionFor(file.type)}`
           : file.name;
 
+      const url = URL.createObjectURL(file);
+      let duration = 3.5;
+      let width: number | undefined;
+      let height: number | undefined;
+
+      if (isVideo) {
+        // Read the REAL length/size so the clip, the trim sliders and Auto-Cut know what they are working with
+        const info = await probeVideo(url);
+        if (!info) {
+          URL.revokeObjectURL(url);
+          unreadable.push(name);
+          continue;
+        }
+        duration = info.duration > 0 ? info.duration : 5;
+        width = info.width;
+        height = info.height;
+        if (file.size > LARGE_VIDEO_BYTES) sawLargeVideo = true;
+      }
+
       newItems.push({
         id: `${source === 'paste' ? 'paste' : source === 'drop' ? 'drop' : 'upload'}-${stamp}-${index}`,
         name,
         type: isVideo ? 'video' : 'image',
-        url: URL.createObjectURL(file),
-        duration: isVideo ? 5 : 3.5,
+        url,
+        duration,
+        width,
+        height,
         file,
       });
-    });
+    }
 
-    if (newItems.length > 0) {
-      onAddMediaRef.current(newItems);
-      if (source === 'paste') {
-        showFlash('ok', `Pasted ${newItems.length} ${newItems.length === 1 ? 'image' : 'files'} from your clipboard.`);
-      }
-    } else if (source === 'paste') {
+    if (newItems.length > 0) onAddMediaRef.current(newItems);
+
+    if (unreadable.length > 0) {
+      showFlash(
+        'info',
+        `"${unreadable[0]}"${unreadable.length > 1 ? ` and ${unreadable.length - 1} more` : ''} couldn't be read by this browser, so ${
+          unreadable.length > 1 ? 'they were' : 'it was'
+        } skipped. iPhone videos in HEVC format often fail on Windows - re-export as MP4 / "Most Compatible", or try Safari or Edge.`
+      );
+    } else if (sawLargeVideo) {
+      showFlash(
+        'info',
+        "Large video added. It works for editing now, but it's too big to be kept if you leave this page (for example to buy credits), so you'd need to add it again."
+      );
+    } else if (newItems.length > 0 && source === 'paste') {
+      showFlash('ok', `Pasted ${newItems.length} ${newItems.length === 1 ? 'image' : 'files'} from your clipboard.`);
+    } else if (newItems.length === 0 && source === 'paste') {
       showFlash('info', 'The clipboard had no image or video. Copy a picture or take a screenshot first.');
     }
   };
@@ -224,7 +285,7 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
             </kbd>{' '}
             to paste it
           </p>
-          <p className="text-[10px] text-slate-500 mt-1">Supports JPG, PNG, WEBP, MP4, MOV, WEBM</p>
+          <p className="text-[10px] text-slate-500 mt-1">Photos (JPG, PNG, WEBP) and phone videos (MP4, MOV, WEBM)</p>
         </div>
       ) : (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2.5 max-h-48 overflow-y-auto pr-1">
@@ -240,7 +301,7 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-150"
                 />
               ) : (
-                <video src={item.url} className="w-full h-full object-cover" muted playsInline />
+                <video src={`${item.url}#t=0.1`} className="w-full h-full object-cover" muted playsInline preload="metadata" />
               )}
 
               <div className="absolute top-1 left-1 flex items-center space-x-1 px-1 py-0.5 rounded bg-black/70 text-[9px] font-mono text-white">
@@ -250,6 +311,7 @@ const MediaUploaderComponent: React.FC<MediaUploaderProps> = ({
                   <Video className="w-2.5 h-2.5 text-amber-400" />
                 )}
                 <span>#{idx + 1}</span>
+                {item.type === 'video' && item.duration ? <span className="text-amber-300">{Math.round(item.duration)}s</span> : null}
               </div>
 
               <button

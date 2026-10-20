@@ -21,6 +21,9 @@ const DB_NAME = 'reelcraft-studio';
 const DB_VERSION = 1;
 const STORE_NAME = 'project';
 const RECORD_ID = 'current';
+// Phone videos can be hundreds of MB. Browsers cap what a site may store, and one oversized write would
+// make the whole autosave fail, so videos above this size are kept in memory only (not restored after a reload).
+const MAX_SAVED_VIDEO_BYTES = 150 * 1024 * 1024;
 
 export interface StudioSnapshot {
   prompt: string;
@@ -34,6 +37,8 @@ export interface StudioSnapshot {
   preferredMotion: MotionType;
   voicePersona: string;
   subtitleConfig: SubtitleConfig;
+  /** Set on load: how many videos were too large to be saved. */
+  droppedLargeMedia?: number;
 }
 
 interface StoredRecord {
@@ -74,9 +79,14 @@ export async function saveStudioProject(snapshot: StudioSnapshot): Promise<void>
   try {
     const mediaBlobs: Record<string, Blob> = {};
     const mediaItems: MediaItem[] = [];
+    const droppedIds = new Set<string>();
     for (const item of snapshot.mediaItems) {
       if (item.url.startsWith('blob:')) {
         const blob = item.file || (await blobFromUrl(item.url));
+        if (blob && item.type === 'video' && blob.size > MAX_SAVED_VIDEO_BYTES) {
+          droppedIds.add(item.id);
+          continue;
+        }
         if (blob) {
           mediaBlobs[item.id] = blob;
           mediaItems.push({ ...item, url: '', file: undefined, thumbnail: undefined });
@@ -107,9 +117,29 @@ export async function saveStudioProject(snapshot: StudioSnapshot): Promise<void>
       }
     }
 
-    const record: StoredRecord = {
+    // Clips that point at a video we could not save are removed (and the rest re-packed) so nothing restores blank.
+    let project = snapshot.project;
+    if (droppedIds.size > 0) {
+      let t = 0;
+      const keptClips = project.clips
+        .filter((c) => !droppedIds.has(c.mediaId))
+        .map((c) => {
+          const out = { ...c, startTime: Number(t.toFixed(2)) };
+          t += c.duration;
+          return out;
+        });
+      project = {
+        ...project,
+        clips: keptClips,
+        captions: project.captions.filter((cap) => cap.startTime < t),
+        totalDuration: Number(t.toFixed(2)),
+      };
+    }
+
+    const record: StoredRecord & { droppedLargeMedia?: number } = {
       id: RECORD_ID,
-      snapshot: { ...snapshot, mediaItems, audioSettings: { ...snapshot.audioSettings, voiceover, music } },
+      droppedLargeMedia: droppedIds.size,
+      snapshot: { ...snapshot, project, mediaItems, audioSettings: { ...snapshot.audioSettings, voiceover, music } },
       mediaBlobs,
       voiceoverBlob,
       musicBlob,
@@ -170,7 +200,12 @@ export async function loadStudioProject(): Promise<StudioSnapshot | null> {
       ? { ...snap.audioSettings.music, url: URL.createObjectURL(record.musicBlob) }
       : snap.audioSettings.music;
 
-    return { ...snap, mediaItems, audioSettings: { ...snap.audioSettings, voiceover, music } };
+    return {
+      ...snap,
+      mediaItems,
+      audioSettings: { ...snap.audioSettings, voiceover, music },
+      droppedLargeMedia: (record as any).droppedLargeMedia || 0,
+    };
   } catch (err) {
     console.error('Failed to load studio project:', err);
     return null;

@@ -4,6 +4,8 @@ import {
   Zap,
   Type,
   Plus,
+  Clock,
+  Volume2,
 } from 'lucide-react';
 import {
   TimelineClip,
@@ -22,6 +24,7 @@ interface TimelineInspectorProps {
   onUpdateClipMotion?: (clipId: string, motion: MotionType) => void;
   onUpdateClipTextOverlay?: (clipId: string, overlay: SceneTextOverlay | undefined) => void;
   onOpenSettings?: () => void;
+  onUpdateClipTiming?: (clipId: string, patch: { duration?: number; trimStart?: number; keepAudio?: boolean }) => void;
 }
 
 const TimelineInspectorComponent: React.FC<TimelineInspectorProps> = ({
@@ -32,6 +35,7 @@ const TimelineInspectorComponent: React.FC<TimelineInspectorProps> = ({
   onUpdateClipTransition,
   onUpdateClipTextOverlay,
   onOpenSettings,
+  onUpdateClipTiming,
 }) => {
   const getMediaItem = (mediaId: string) => {
     return mediaItems.find((m) => m.id === mediaId);
@@ -88,10 +92,11 @@ const TimelineInspectorComponent: React.FC<TimelineInspectorProps> = ({
                     />
                   ) : (
                     <video
-                      src={media.url}
+                      src={`${media.url}#t=0.1`}
                       className="w-full h-full object-cover"
                       muted
                       playsInline
+                      preload="metadata"
                     />
                   )
                 ) : (
@@ -153,6 +158,69 @@ const TimelineInspectorComponent: React.FC<TimelineInspectorProps> = ({
                   </select>
                 </div>
               )}
+
+              {/* Clip length + (videos) trim start & original sound */}
+              {onUpdateClipTiming && (() => {
+                const isVideo = media?.type === 'video';
+                const srcDur = isVideo ? media?.duration || 0 : 0;
+                const trim = clip.trimStart || 0;
+                const maxLen = isVideo && srcDur > 0 ? Math.max(clip.duration, srcDur - trim) : 15;
+                const maxTrim = Math.max(0, srcDur - 0.5);
+                return (
+                  <div className="space-y-2 pt-0.5" onClick={(e) => e.stopPropagation()}>
+                    <div className="space-y-0.5">
+                      <label className="text-[10px] text-slate-400 flex items-center justify-between">
+                        <span className="flex items-center space-x-1">
+                          <Clock className="w-3 h-3 text-cyan-400" />
+                          <span>Length</span>
+                        </span>
+                        <span className="font-mono text-slate-300">{clip.duration.toFixed(1)}s</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={0.5}
+                        max={Math.max(1, Number(maxLen.toFixed(1)))}
+                        step={0.1}
+                        value={clip.duration}
+                        onChange={(e) => onUpdateClipTiming(clip.id, { duration: Number(e.target.value) })}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                        aria-label="Clip length in seconds"
+                      />
+                    </div>
+
+                    {isVideo && srcDur > 0 && (
+                      <>
+                        <div className="space-y-0.5">
+                          <label className="text-[10px] text-slate-400 flex items-center justify-between">
+                            <span>Start at (of {srcDur.toFixed(1)}s video)</span>
+                            <span className="font-mono text-slate-300">{trim.toFixed(1)}s</span>
+                          </label>
+                          <input
+                            type="range"
+                            min={0}
+                            max={Number(maxTrim.toFixed(1))}
+                            step={0.1}
+                            value={Math.min(trim, maxTrim)}
+                            onChange={(e) => onUpdateClipTiming(clip.id, { trimStart: Number(e.target.value) })}
+                            className="w-full accent-pink-400 cursor-pointer"
+                            aria-label="Where this clip starts inside the video"
+                          />
+                        </div>
+                        <label className="flex items-center space-x-1.5 text-[10px] text-slate-300 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={!!clip.keepAudio}
+                            onChange={(e) => onUpdateClipTiming(clip.id, { keepAudio: e.target.checked })}
+                            className="accent-indigo-500"
+                          />
+                          <Volume2 className="w-3 h-3 text-indigo-300" />
+                          <span>Keep this video&apos;s original sound</span>
+                        </label>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Title / Text Overlay Status & Quick Add */}
               <div className="pt-0.5">

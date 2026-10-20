@@ -199,6 +199,9 @@ export function Studio({
           setSubtitleConfig(saved.subtitleConfig);
           setProject(saved.project);
           setSelectedClipId(saved.project.clips[0]?.id);
+          if (saved.droppedLargeMedia) {
+            showToast(`${saved.droppedLargeMedia} large video(s) were too big to keep while you were away - please add them again.`, 'info');
+          }
         }
       }
       if (!cancelled) setHasRestoreChecked(true);
@@ -354,6 +357,7 @@ export function Studio({
           transitionIn: (c.transitionIn as TransitionType) || (i === 0 ? 'none' : 'crossfade'),
           transitionDuration: Math.min(c.transitionDuration || 0.5, dur * 0.45),
           motionEffect: (c.motionEffect as MotionType) || 'push-in',
+          trimStart: items.find((it) => it.id === (c.mediaId || items[i % items.length].id))?.type === 'video' ? 0 : undefined,
           caption: c.caption || `Scene ${i + 1}`,
           textOverlay: titleText
             ? {
@@ -427,7 +431,8 @@ export function Studio({
     setProject((prev) => {
       let t = prev.clips.reduce((end, c) => Math.max(end, c.startTime + c.duration), 0);
       const added: TimelineClip[] = newItems.map((it, i) => {
-        const dur = it.duration || 3.5;
+        // A phone video can be minutes long: start with up to 10s of it (the Length / Start-at sliders adjust this)
+        const dur = it.type === 'video' ? Math.min(it.duration || 5, 10) : it.duration || 3.5;
         const clip: TimelineClip = {
           id: `clip-add-${Date.now()}-${i}`,
           mediaId: it.id,
@@ -436,6 +441,7 @@ export function Studio({
           transitionIn: prev.clips.length === 0 && i === 0 ? 'none' : preferredTransition,
           transitionDuration: 0.5,
           motionEffect: it.type === 'image' ? preferredMotion : 'none',
+          trimStart: it.type === 'video' ? 0 : undefined,
         };
         t += dur;
         return clip;
@@ -467,6 +473,54 @@ export function Studio({
           const shift = removedClipRanges.reduce((sum, [a, b]) => (b <= cap.startTime + 0.01 ? sum + (b - a) : sum), 0);
           return { ...cap, startTime: cap.startTime - shift, endTime: cap.endTime - shift };
         });
+      return { ...prev, clips, captions, totalDuration: Number(t.toFixed(2)) };
+    });
+  };
+
+  // Length / trim / original-sound edits on one clip. Later clips and captions move with it.
+  const handleUpdateClipTiming = (clipId: string, patch: { duration?: number; trimStart?: number; keepAudio?: boolean }) => {
+    setProject((prev) => {
+      const idx = prev.clips.findIndex((c) => c.id === clipId);
+      if (idx < 0) return prev;
+      const old = prev.clips[idx];
+      const media = mediaItems.find((m) => m.id === old.mediaId);
+      const isVideo = media?.type === 'video';
+      const srcDur = isVideo ? media?.duration || 0 : 0;
+
+      let duration = Math.max(0.5, Math.min(120, Number((patch.duration ?? old.duration).toFixed(2))));
+      let trimStart = patch.trimStart ?? old.trimStart ?? 0;
+      if (isVideo && srcDur > 0) {
+        trimStart = Math.max(0, Math.min(trimStart, Math.max(0, srcDur - 0.5)));
+        // Moving the start point later leaves less video: shorten the clip instead of looping the last frames
+        if (patch.trimStart !== undefined && patch.duration === undefined && duration > srcDur - trimStart) {
+          duration = Math.max(0.5, Number((srcDur - trimStart).toFixed(2)));
+        }
+      }
+
+      const updated: TimelineClip = {
+        ...old,
+        duration,
+        transitionDuration: Math.min(old.transitionDuration, duration * 0.45),
+        trimStart: isVideo ? trimStart : old.trimStart,
+        keepAudio: patch.keepAudio ?? old.keepAudio,
+      };
+
+      const delta = duration - old.duration;
+      const oldEnd = old.startTime + old.duration;
+      let t = 0;
+      const clips = prev.clips.map((c) => {
+        const cc = c.id === clipId ? updated : c;
+        const out = { ...cc, startTime: Number(t.toFixed(2)) };
+        t += cc.duration;
+        return out;
+      });
+      const captions = prev.captions.map((cap) => {
+        if (cap.startTime >= oldEnd - 0.01) return { ...cap, startTime: cap.startTime + delta, endTime: cap.endTime + delta };
+        if (cap.startTime >= old.startTime - 0.01 && cap.endTime > old.startTime + duration) {
+          return { ...cap, endTime: Math.max(cap.startTime + 0.3, old.startTime + duration - 0.05) };
+        }
+        return cap;
+      });
       return { ...prev, clips, captions, totalDuration: Number(t.toFixed(2)) };
     });
   };
@@ -667,6 +721,7 @@ export function Studio({
                 }}
                 onUpdateClipTextOverlay={handleUpdateClipTextOverlay}
                 onOpenSettings={() => setIsSidePanelOpen(true)}
+                onUpdateClipTiming={handleUpdateClipTiming}
               />
             </div>
           )}

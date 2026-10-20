@@ -125,6 +125,10 @@ export interface TimelineClip {
   caption?: string;
   captionHighlight?: string;
   textOverlay?: SceneTextOverlay;
+  /** Videos only: where in the source video this clip starts (seconds). */
+  trimStart?: number;
+  /** Videos only: play the clip's own recorded sound. */
+  keepAudio?: boolean;
 }
 
 export interface CaptionSegment {
