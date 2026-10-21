@@ -5,6 +5,7 @@ import {
   AspectRatio,
   ColorFilterType,
   CaptionStyle,
+  NarrationState,
   TransitionType,
   MotionType,
   SubtitleConfig,
@@ -37,6 +38,7 @@ export interface StudioSnapshot {
   preferredMotion: MotionType;
   voicePersona: string;
   subtitleConfig: SubtitleConfig;
+  narration?: NarrationState | null;
   /** Set on load: how many videos were too large to be saved. */
   droppedLargeMedia?: number;
 }

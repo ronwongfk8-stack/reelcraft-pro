@@ -62,6 +62,7 @@ interface SideControlPanelProps {
   voicePersona: string;
   onVoicePersonaChange: (persona: string) => void;
   onVoiceoverTranscribed?: (transcript: string) => void;
+  onOpenNarration?: () => void;
   currentClip?: TimelineClip;
   currentClipIndex?: number;
   onUpdateCurrentClipTextOverlay?: (overlay: SceneTextOverlay | undefined) => void;
@@ -87,6 +88,7 @@ const SideControlPanelComponent: React.FC<SideControlPanelProps> = ({
   voicePersona,
   onVoicePersonaChange,
   onVoiceoverTranscribed,
+  onOpenNarration,
   currentClip,
   currentClipIndex = 0,
   onUpdateCurrentClipTextOverlay,
@@ -502,6 +504,66 @@ const SideControlPanelComponent: React.FC<SideControlPanelProps> = ({
 
             {openSections.voiceover && (
               <div className="p-3.5 pt-0 border-t border-slate-800/80 space-y-3 text-xs">
+                {onOpenNarration && (
+                  <button
+                    onClick={onOpenNarration}
+                    className="mt-3 w-full flex items-center justify-center space-x-1.5 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 text-white font-bold text-xs shadow cursor-pointer"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Create AI voiceover from my photos</span>
+                  </button>
+                )}
+                {/* Upload or Record Voice */}
+                <div className="flex items-center space-x-2">
+                  <input
+                    ref={voiceFileInputRef}
+                    type="file"
+                    accept="audio/*"
+                    onChange={handleVoiceUpload}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => voiceFileInputRef.current?.click()}
+                    className="flex-1 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-colors flex items-center justify-center space-x-1"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Upload Voice Audio</span>
+                  </button>
+
+                  {isRecording ? (
+                    <button
+                      onClick={stopRecording}
+                      className="flex-1 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold animate-pulse flex items-center justify-center space-x-1"
+                    >
+                      <Square className="w-3.5 h-3.5 fill-white" />
+                      <span>Stop ({recordDuration}s)</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startRecording}
+                      className="flex-1 py-1.5 rounded-lg bg-pink-600/20 hover:bg-pink-600/30 text-pink-300 text-xs font-medium border border-pink-500/30 flex items-center justify-center space-x-1"
+                    >
+                      <Mic className="w-3.5 h-3.5" />
+                      <span>Record Mic</span>
+                    </button>
+                  )}
+                </div>
+                {voiceNotice && (
+                  <p
+                    className={`text-[11px] leading-snug rounded-lg px-2.5 py-1.5 border ${
+                      voiceNotice.kind === 'ok'
+                        ? 'text-emerald-300 bg-emerald-950/50 border-emerald-800/60'
+                        : 'text-amber-300 bg-amber-950/50 border-amber-800/60'
+                    }`}
+                  >
+                    {voiceNotice.text}
+                  </p>
+                )}
+                <details className="rounded-lg border border-slate-800 bg-slate-900/50">
+                  <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold text-slate-300 hover:text-white">
+                    Or type my own script
+                  </summary>
+                  <div className="px-3 pb-3 space-y-3">
                 <div className="pt-2 space-y-1.5">
                   <span className="text-slate-400 block font-semibold">Select Voice Persona:</span>
                   <div className="grid grid-cols-2 gap-1.5">
@@ -546,54 +608,10 @@ const SideControlPanelComponent: React.FC<SideControlPanelProps> = ({
                       {previewPlaying ? 'Stop Test' : '▶ Listen'}
                     </button>
                   </div>
-                  {voiceNotice && (
-                    <p
-                      className={`text-[11px] leading-snug rounded-lg px-2.5 py-1.5 border ${
-                        voiceNotice.kind === 'ok'
-                          ? 'text-emerald-300 bg-emerald-950/50 border-emerald-800/60'
-                          : 'text-amber-300 bg-amber-950/50 border-amber-800/60'
-                      }`}
-                    >
-                      {voiceNotice.text}
-                    </p>
-                  )}
                 </div>
 
-                {/* Upload or Record Voice */}
-                <div className="flex items-center space-x-2 pt-2 border-t border-slate-800">
-                  <input
-                    ref={voiceFileInputRef}
-                    type="file"
-                    accept="audio/*"
-                    onChange={handleVoiceUpload}
-                    className="hidden"
-                  />
-                  <button
-                    onClick={() => voiceFileInputRef.current?.click()}
-                    className="flex-1 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-colors flex items-center justify-center space-x-1"
-                  >
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>Upload Voice Audio</span>
-                  </button>
-
-                  {isRecording ? (
-                    <button
-                      onClick={stopRecording}
-                      className="flex-1 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold animate-pulse flex items-center justify-center space-x-1"
-                    >
-                      <Square className="w-3.5 h-3.5 fill-white" />
-                      <span>Stop ({recordDuration}s)</span>
-                    </button>
-                  ) : (
-                    <button
-                      onClick={startRecording}
-                      className="flex-1 py-1.5 rounded-lg bg-pink-600/20 hover:bg-pink-600/30 text-pink-300 text-xs font-medium border border-pink-500/30 flex items-center justify-center space-x-1"
-                    >
-                      <Mic className="w-3.5 h-3.5" />
-                      <span>Record Mic</span>
-                    </button>
-                  )}
-                </div>
+                  </div>
+                </details>
               </div>
             )}
           </div>

@@ -480,53 +480,149 @@ class WebAudioEngine {
   // Long scripts are split into short chunks so each response stays well under Vercel's ~4.5 MB response limit,
   // then the WAV pieces are stitched together in the browser. If Gemini fails this THROWS - there is deliberately
   // no robotic browser-voice fallback.
+
+  /** One request to the voice service for a short piece of text (retries transient errors). */
+  private async fetchVoiceChunk(
+    chunk: string,
+    voice: { id: string; gender: string; tone: string },
+    signal?: AbortSignal
+  ): Promise<{ pcm: Uint8Array; sampleRate: number }> {
+    let lastError = '';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (signal?.aborted) throw new Error('Cancelled');
+      try {
+        const res = await fetch('/api/voiceover/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: chunk, voiceId: voice.id, gender: voice.gender, tone: voice.tone }),
+          signal,
+        });
+        const json = await res.json().catch(() => null);
+        if (res.ok && json?.success && json.audioBase64) {
+          return readWav(base64ToBytes(json.audioBase64));
+        }
+        lastError = json?.error || `Voice service returned ${res.status}`;
+        if (res.status < 500 && res.status !== 429) break; // not worth retrying (bad request etc.)
+      } catch (e: any) {
+        if (e?.name === 'AbortError') throw new Error('Cancelled');
+        lastError = e?.message || 'Network error while generating the voiceover.';
+      }
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt));
+    }
+    throw new Error(lastError || 'Voice generation failed.');
+  }
+
+  /** Text of any length -> raw 16-bit PCM (split into chunks and joined). */
+  private async fetchVoicePcm(
+    text: string,
+    voice: { id: string; gender: string; tone: string },
+    signal?: AbortSignal
+  ): Promise<{ pcm: Uint8Array; sampleRate: number }> {
+    const chunks = splitForTts(text, 500);
+    if (chunks.length === 0) throw new Error('Please enter a narration script first.');
+    const parts: Uint8Array[] = [];
+    let sampleRate = 24000;
+    for (const chunk of chunks) {
+      const piece = await this.fetchVoiceChunk(chunk, voice, signal);
+      sampleRate = piece.sampleRate;
+      parts.push(piece.pcm);
+    }
+    const total = parts.reduce((n, p) => n + p.length, 0);
+    const pcm = new Uint8Array(total);
+    let offset = 0;
+    for (const p of parts) {
+      pcm.set(p, offset);
+      offset += p.length;
+    }
+    return { pcm, sampleRate };
+  }
+
+  private resolveVoice(voiceId: string) {
+    return [...MALE_VOICES, ...FEMALE_VOICES].find((v) => v.id === voiceId) || MALE_VOICES[1];
+  }
+
   public async generateVoiceoverAudio(
     text: string,
     voiceId = 'male-marcus'
   ): Promise<{ url: string; duration: number; blob: Blob }> {
-    const voice = [...MALE_VOICES, ...FEMALE_VOICES].find((v) => v.id === voiceId) || MALE_VOICES[1];
-    const chunks = splitForTts(text, 500);
-    if (chunks.length === 0) throw new Error('Please enter a narration script first.');
+    const { pcm, sampleRate } = await this.fetchVoicePcm(text, this.resolveVoice(voiceId));
+    const blob = new Blob([buildWav(pcm, sampleRate)], { type: 'audio/wav' });
+    return { url: URL.createObjectURL(blob), duration: pcm.length / (sampleRate * 2), blob };
+  }
 
-    const pcmParts: Uint8Array[] = [];
-    let sampleRate = 24000;
+  /**
+   * Voices one line per scene and lays the lines on a single track so that each line starts exactly when its
+   * scene does. Each scene is as long as its line needs (never shorter than minScene), so the picture on screen
+   * always matches what is being said.
+   */
+  public async generateNarrationTrack(
+    lines: string[],
+    voiceId: string,
+    opts: {
+      onProgress?: (done: number, total: number) => void;
+      signal?: AbortSignal;
+      concurrency?: number;
+      leadIn?: number;
+      firstLeadIn?: number;
+      gap?: number;
+      minScene?: number;
+    } = {}
+  ): Promise<{
+    url: string;
+    blob: Blob;
+    duration: number;
+    scenes: { sceneStart: number; sceneDuration: number; voiceStart: number; voiceDuration: number }[];
+  }> {
+    const { onProgress, signal, concurrency = 2, leadIn = 0.25, firstLeadIn = 0.4, gap = 0.4, minScene = 2.5 } = opts;
+    const voice = this.resolveVoice(voiceId);
+    if (lines.length === 0) throw new Error('There are no scenes to voice.');
 
-    for (const chunk of chunks) {
-      let data: any = null;
-      let lastError = '';
-      for (let attempt = 0; attempt < 2 && !data; attempt++) {
+    const results: ({ pcm: Uint8Array; sampleRate: number } | null)[] = lines.map(() => null);
+    let next = 0;
+    let done = 0;
+    let failure: Error | null = null;
+    onProgress?.(0, lines.length);
+
+    const worker = async () => {
+      while (!failure) {
+        const i = next++;
+        if (i >= lines.length) return;
         try {
-          const res = await fetch('/api/voiceover/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: chunk, voiceId: voice.id, gender: voice.gender, tone: voice.tone }),
-          });
-          const json = await res.json().catch(() => null);
-          if (res.ok && json?.success && json.audioBase64) {
-            data = json;
-          } else {
-            lastError = json?.error || `Voice service returned ${res.status}`;
-            if (res.status < 500 && res.status !== 429) break; // not worth retrying (bad request etc.)
-          }
+          results[i] = await this.fetchVoicePcm(lines[i], voice, signal);
+          done++;
+          onProgress?.(done, lines.length);
         } catch (e: any) {
-          lastError = e?.message || 'Network error while generating the voiceover.';
+          failure = new Error(e?.message === 'Cancelled' ? 'Cancelled' : `Scene ${i + 1}: ${e?.message || 'voice failed'}`);
         }
       }
-      if (!data) throw new Error(lastError || 'Voice generation failed.');
-      const parsed = readWav(base64ToBytes(data.audioBase64));
-      sampleRate = parsed.sampleRate;
-      pcmParts.push(parsed.pcm);
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, lines.length) }, worker));
+    if (failure) throw failure;
 
-    const total = pcmParts.reduce((n, p) => n + p.length, 0);
-    const pcm = new Uint8Array(total);
-    let offset = 0;
-    for (const p of pcmParts) {
-      pcm.set(p, offset);
-      offset += p.length;
-    }
-    const blob = new Blob([buildWav(pcm, sampleRate)], { type: 'audio/wav' });
-    return { url: URL.createObjectURL(blob), duration: total / (sampleRate * 2), blob };
+    const sampleRate = results[0]!.sampleRate;
+    const bytesPerSec = sampleRate * 2;
+
+    // Lay out the scenes
+    const layout: { sceneStart: number; sceneDuration: number; voiceStart: number; voiceDuration: number }[] = [];
+    let t = 0;
+    results.forEach((r, i) => {
+      const voiceDuration = r!.pcm.length / bytesPerSec;
+      const lead = i === 0 ? firstLeadIn : leadIn;
+      const sceneDuration = Math.max(minScene, lead + voiceDuration + gap);
+      layout.push({ sceneStart: t, sceneDuration, voiceStart: t + lead, voiceDuration });
+      t += sceneDuration;
+    });
+
+    // Build the single track (silence everywhere except where a line is spoken)
+    const totalSamples = Math.ceil(t * sampleRate);
+    const track = new Uint8Array(totalSamples * 2);
+    layout.forEach((l, i) => {
+      const offset = Math.round(l.voiceStart * sampleRate) * 2;
+      track.set(results[i]!.pcm.subarray(0, Math.max(0, track.length - offset)), offset);
+    });
+
+    const blob = new Blob([buildWav(track, sampleRate)], { type: 'audio/wav' });
+    return { url: URL.createObjectURL(blob), blob, duration: t, scenes: layout };
   }
 
   public pauseAll() {

@@ -15,6 +15,7 @@ import {
   Layers,
   LifeBuoy,
   Home,
+  Mic,
 } from 'lucide-react';
 import {
   VideoProject,
@@ -29,6 +30,7 @@ import {
   TimelineClip,
   CaptionSegment,
   SceneTextOverlay,
+  NarrationState,
 } from './types';
 import { VideoCanvasPlayer } from './components/VideoCanvasPlayer';
 import { MediaUploader } from './components/MediaUploader';
@@ -38,6 +40,10 @@ import { audioEngine } from './utils/audioEngine';
 import { parseSubtitleFromPrompt, DEFAULT_SUBTITLE_CONFIG } from './utils/subtitleParser';
 import { saveStudioProject, loadStudioProject, clearStudioProject } from './utils/studioStorage';
 import { CreditBadge } from '../components/CreditBadge';
+import { NarrationPanel, ApplyNarrationResult } from './components/NarrationPanel';
+import { clipSignature, splitCaptionPhrases } from './utils/narration';
+import { DEFAULT_INDUSTRY, PRESET_INDUSTRY } from './data/industryForms';
+import { MALE_VOICES, FEMALE_VOICES } from '../data/voiceData';
 import { MUSIC_PRESETS as LIVE_MUSIC_PRESETS } from '../data/sampleAssets';
 import type { PropertyPreset, UserCreditAccount } from '../types';
 
@@ -134,6 +140,8 @@ export function Studio({
 
   // Settings & Fine-Tune Controls (Tucked into Side Panel)
   const [isSidePanelOpen, setIsSidePanelOpen] = useState<boolean>(false);
+  const [isNarrationOpen, setIsNarrationOpen] = useState<boolean>(false);
+  const [narration, setNarration] = useState<NarrationState | null>(null);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
   const [colorFilter, setColorFilter] = useState<ColorFilterType>('natural');
   const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('beast-glow');
@@ -197,6 +205,7 @@ export function Studio({
           setPreferredMotion(saved.preferredMotion);
           setVoicePersona(saved.voicePersona);
           setSubtitleConfig(saved.subtitleConfig);
+          setNarration(saved.narration || null);
           setProject(saved.project);
           setSelectedClipId(saved.project.clips[0]?.id);
           if (saved.droppedLargeMedia) {
@@ -214,7 +223,7 @@ export function Studio({
 
   // ---- Autosave (debounced) so a reload or the Stripe round-trip never loses the user's work ----
   const snapshotRef = useRef<any>(null);
-  snapshotRef.current = { prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig };
+  snapshotRef.current = { prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig, narration };
 
   const saveNow = useCallback(async () => {
     const snap = snapshotRef.current;
@@ -234,7 +243,7 @@ export function Studio({
     }
     const timeout = setTimeout(saveNow, 1500);
     return () => clearTimeout(timeout);
-  }, [hasRestoreChecked, prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig, saveNow]);
+  }, [hasRestoreChecked, prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig, narration, saveNow]);
 
   // ---- Credit gate: one credit per export, same rule as before ----
   const handleBeforeExport = async (): Promise<boolean> => {
@@ -252,6 +261,68 @@ export function Studio({
     }
     return true;
   };
+
+  // ---- AI voiceover: each scene becomes exactly as long as its spoken line, so picture and words always match ----
+  const defaultIndustry = (initialPreset && PRESET_INDUSTRY[initialPreset.id]) || DEFAULT_INDUSTRY;
+
+  const handleApplyNarration = (r: ApplyNarrationResult) => {
+    const byId = new Map(r.scenes.map((sc) => [sc.clipId, sc]));
+    setProject((prev) => {
+      let t = 0;
+      const captions: CaptionSegment[] = [];
+      const clips = prev.clips.map((c) => {
+        const sc = byId.get(c.id);
+        const duration = sc ? Number(sc.sceneDuration.toFixed(2)) : c.duration;
+        const out: TimelineClip = {
+          ...c,
+          startTime: Number(t.toFixed(2)),
+          duration,
+          transitionDuration: Math.min(c.transitionDuration, duration * 0.45),
+          caption: sc ? sc.line : c.caption,
+        };
+        if (sc) captions.push(...splitCaptionPhrases(sc.line, t + sc.lead, sc.voiceDuration, `cap-nar-${c.id}`));
+        t += duration;
+        return out;
+      });
+      return { ...prev, clips, captions, totalDuration: Number(t.toFixed(2)) };
+    });
+
+    const voiceName = [...MALE_VOICES, ...FEMALE_VOICES].find((v) => v.id === r.voiceId)?.name || 'AI';
+    setAudioSettings((prev) => ({
+      ...prev,
+      voiceover: {
+        ...prev.voiceover,
+        url: r.audioUrl,
+        name: `AI Voice (${voiceName})`,
+        duration: r.audioDuration,
+        transcript: r.scenes.map((sc) => sc.line).join(' '),
+        useNativeSpeech: false,
+        voicePersona: r.voiceId,
+        muted: false,
+      },
+    }));
+    setVoicePersona(r.voiceId);
+    setNarration(r.state);
+    showToast('Voiceover added. Press play to watch it.', 'success');
+  };
+
+  // Auto-Cut re-plans every scene, which would break the line-by-line match of an existing AI voiceover
+  const handleAutoCutClick = () => {
+    const voiced = !!narration?.voicedText && narration.signature === clipSignature(project.clips);
+    if (voiced && !window.confirm('Auto-Cut will re-time your scenes and the AI voiceover will no longer match each photo. Continue?')) return;
+    handleGenerateVideo(prompt, mediaItems, audioSettings);
+  };
+
+  const openNarration = () => {
+    if (mediaItems.length === 0 || project.clips.length === 0) {
+      showToast('Add your photos or videos first, then create the voiceover.', 'info');
+      return;
+    }
+    setIsSidePanelOpen(false);
+    setIsNarrationOpen(true);
+  };
+
+  const narrationStale = !!narration && narration.lines.length > 0 && narration.signature !== '' && narration.signature !== clipSignature(project.clips);
 
   const showToast = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
     setNotification({ message, type });
@@ -591,7 +662,10 @@ export function Studio({
               <LifeBuoy className="w-4 h-4" />
             </button>
             <button
-              onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}
+              onClick={() => {
+                setIsNarrationOpen(false);
+                setIsSidePanelOpen(!isSidePanelOpen);
+              }}
               className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
                 isSidePanelOpen
                   ? 'bg-indigo-600 text-white border-indigo-500 shadow-md'
@@ -610,7 +684,7 @@ export function Studio({
       {/* Main Streamlined Workspace */}
       <main
         className={`max-w-5xl mx-auto px-4 pt-6 w-full space-y-6 flex-1 transition-all duration-200 ${
-          isSidePanelOpen ? 'xl:mr-[400px] xl:max-w-4xl' : ''
+          isSidePanelOpen || isNarrationOpen ? 'xl:mr-[400px] xl:max-w-4xl' : ''
         }`}
       >
         {/* 1. MASTER PROMPT DIRECTIVE BAR */}
@@ -634,14 +708,25 @@ export function Studio({
               className="flex-1 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl p-3 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all resize-none"
             />
 
-            <button
-              onClick={() => handleGenerateVideo(prompt, mediaItems, audioSettings)}
-              disabled={isGenerating || mediaItems.length === 0}
-              className="sm:w-44 h-auto py-3 px-4 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-indigo-900/30 transition-all flex items-center justify-center space-x-1.5 cursor-pointer shrink-0 active:scale-95"
-            >
-              <Sparkles className="w-4 h-4" />
-              <span>{isGenerating ? 'Editing Video...' : '✨ Auto-Cut Video'}</span>
-            </button>
+            <div className="flex sm:flex-col gap-2 sm:w-44 shrink-0">
+              <button
+                onClick={handleAutoCutClick}
+                disabled={isGenerating || mediaItems.length === 0}
+                className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-indigo-900/30 transition-all flex items-center justify-center space-x-1.5 cursor-pointer active:scale-95"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>{isGenerating ? 'Editing Video...' : '✨ Auto-Cut Video'}</span>
+              </button>
+              <button
+                onClick={openNarration}
+                className="relative flex-1 py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-pink-500/60 text-slate-100 font-semibold text-xs transition-all flex items-center justify-center space-x-1.5 cursor-pointer active:scale-95"
+                title="Write and voice a narration that matches your photos"
+              >
+                <Mic className="w-4 h-4 text-pink-400" />
+                <span>AI Voiceover</span>
+                {narrationStale && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-400 border-2 border-slate-900" />}
+              </button>
+            </div>
           </div>
 
           {/* Director Treatment Note */}
@@ -729,9 +814,22 @@ export function Studio({
       </main>
 
       {/* FLYOUT / DROPDOWN SIDE PANEL CONTROLS */}
+      <NarrationPanel
+        isOpen={isNarrationOpen}
+        onClose={() => setIsNarrationOpen(false)}
+        clips={project.clips}
+        mediaItems={mediaItems}
+        value={narration}
+        defaultIndustry={defaultIndustry}
+        defaultVoiceId={voicePersona}
+        onChange={setNarration}
+        onApply={handleApplyNarration}
+      />
+
       <SideControlPanel
         isOpen={isSidePanelOpen}
         onClose={() => setIsSidePanelOpen(false)}
+        onOpenNarration={openNarration}
         audioSettings={audioSettings}
         onUpdateAudio={(updated) => setAudioSettings((prev) => ({ ...prev, ...updated }))}
         aspectRatio={aspectRatio}
