@@ -199,3 +199,36 @@ export interface PresetSample {
   colorFilter: ColorFilterType;
   items: Omit<MediaItem, 'file'>[];
 }
+
+/** Saved state of the AI voiceover wizard (so reopening it, or reloading the page, keeps the user's work). */
+export interface NarrationState {
+  industry: string;
+  facts: Record<string, string>;
+  voiceId: string;
+  lines: { clipId: string; sees?: string; line: string }[];
+  /** Order of clips when the lines were written. If the photos change, the lines are out of date. */
+  signature: string;
+  /** The exact text that was last turned into audio (so we know when lines were edited afterwards). */
+  voicedText?: string;
+}
+
+export type LogoPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+
+/** A brand logo / watermark drawn on top of the whole video (and recorded in the export). */
+export interface LogoSettings {
+  url: string | null;
+  name: string;
+  position: LogoPosition;
+  /** width as a percentage of the video width */
+  size: number;
+  /** 0.2 - 1 */
+  opacity: number;
+}
+
+export const DEFAULT_LOGO: LogoSettings = {
+  url: null,
+  name: '',
+  position: 'top-right',
+  size: 12,
+  opacity: 0.95,
+};

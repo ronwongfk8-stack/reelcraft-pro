@@ -19,7 +19,9 @@ import {
   Trash2,
   Plus,
 } from 'lucide-react';
-import { VideoProject, MediaItem, AudioSettings, TransitionType, MotionType, ColorFilterType, SceneTextOverlay, TimelineClip } from '../types';
+import { VideoProject, MediaItem, AudioSettings, TransitionType, MotionType, ColorFilterType, SceneTextOverlay, TimelineClip,
+  LogoSettings,
+} from '../types';
 import { audioEngine } from '../utils/audioEngine';
 
 interface VideoCanvasPlayerProps {
@@ -35,6 +37,7 @@ interface VideoCanvasPlayerProps {
   generationStep?: string;
   /** Called right before an export starts. Return false to cancel (e.g. no credits left). */
   onBeforeExport?: () => Promise<boolean>;
+  logo?: LogoSettings;
 }
 
 // Branded ReelCraftpro.com Loading Spinner
@@ -200,6 +203,7 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
   isGenerating,
   generationStep,
   onBeforeExport,
+  logo,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -224,6 +228,7 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
   const isPlayingRef = useRef(false);
   const isExportingRef = useRef(false);
   const isPreparingExportRef = useRef(false);
+  const logoImgRef = useRef<HTMLImageElement | HTMLCanvasElement | null>(null);
   const overlayDomVisibleRef = useRef(false);
   const activeOverlayRef = useRef<SceneTextOverlay | undefined>(undefined);
 
@@ -456,6 +461,30 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
     });
   }, [mediaItems, targetWidth, targetHeight]);
 
+  // Load the logo (re-runs when a different file is chosen); redraw as soon as it is ready
+  useEffect(() => {
+    if (!logo?.url) {
+      logoImgRef.current = null;
+      setAssetTick((t) => t + 1);
+      return;
+    }
+    let cancelled = false;
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => {
+      if (cancelled) return;
+      logoImgRef.current = prepareImage(img, 1024);
+      setAssetTick((t) => t + 1);
+    };
+    img.onerror = () => {
+      if (!cancelled) logoImgRef.current = null;
+    };
+    img.src = logo.url;
+    return () => {
+      cancelled = true;
+    };
+  }, [logo?.url]);
+
   // Redraw once web fonts are ready (canvas text otherwise renders with a fallback font)
   useEffect(() => {
     (document as any).fonts?.ready?.then(() => setAssetTick((t) => t + 1));
@@ -489,6 +518,32 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
   }, [audioSettings.music.url, audioSettings.music.volume, audioSettings.music.muted, isMuted]);
 
   // Draw Frame to Canvas
+  const drawLogo = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    const img = logoImgRef.current;
+    if (!img || !logo?.url) return;
+    // SVGs without a fixed size report 0x0, so fall back to a square
+    const iw = (img as HTMLImageElement).naturalWidth || img.width || 300;
+    const ih = (img as HTMLImageElement).naturalHeight || img.height || 300;
+
+    let dw = (width * Math.min(40, Math.max(3, logo.size))) / 100;
+    let dh = dw * (ih / iw);
+    const maxH = height * 0.3; // very tall logos never take over the frame
+    if (dh > maxH) {
+      dh = maxH;
+      dw = dh * (iw / ih);
+    }
+    const margin = Math.round(width * 0.035);
+    const x = logo.position.endsWith('left') ? margin : width - dw - margin;
+    const y = logo.position.startsWith('top') ? margin : height - dh - margin;
+
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, Math.max(0.2, logo.opacity));
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, x, y, dw, dh);
+    ctx.restore();
+  };
+
   const drawFrame = useCallback(
     (time: number, ctx: CanvasRenderingContext2D, width: number, height: number) => {
       const clips = project.clips;
@@ -809,8 +864,11 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
 
       // 2. Render Synchronized Narration Captions (Subtitles)
       renderCaptions(time, ctx, width, height, project);
+
+      // 3. Brand logo / watermark - always on top, part of every frame so it is also in the exported file
+      drawLogo(ctx, width, height);
     },
-    [project, mediaItems, audioSettings, isMuted, isPlaying, assetTick, showOverlayEditor]
+    [project, mediaItems, audioSettings, isMuted, isPlaying, assetTick, showOverlayEditor, logo]
   );
 
   // Render Chosen Scene's Title / Text Overlay (separate from narration captions)

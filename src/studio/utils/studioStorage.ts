@@ -1,10 +1,12 @@
 import {
   VideoProject,
   MediaItem,
+  LogoSettings,
   AudioSettings,
   AspectRatio,
   ColorFilterType,
   CaptionStyle,
+  NarrationState,
   TransitionType,
   MotionType,
   SubtitleConfig,
@@ -37,6 +39,8 @@ export interface StudioSnapshot {
   preferredMotion: MotionType;
   voicePersona: string;
   subtitleConfig: SubtitleConfig;
+  narration?: NarrationState | null;
+  logo?: LogoSettings;
   /** Set on load: how many videos were too large to be saved. */
   droppedLargeMedia?: number;
 }
@@ -47,6 +51,7 @@ interface StoredRecord {
   mediaBlobs: Record<string, Blob>; // mediaItem.id -> file
   voiceoverBlob?: Blob;
   musicBlob?: Blob;
+  logoBlob?: Blob;
   savedAt: string;
 }
 
@@ -136,13 +141,24 @@ export async function saveStudioProject(snapshot: StudioSnapshot): Promise<void>
       };
     }
 
+    let logoBlob: Blob | undefined;
+    let logo = snapshot.logo;
+    if (logo?.url && logo.url.startsWith('blob:')) {
+      const blob = await blobFromUrl(logo.url);
+      if (blob) {
+        logoBlob = blob;
+        logo = { ...logo, url: null };
+      }
+    }
+
     const record: StoredRecord & { droppedLargeMedia?: number } = {
       id: RECORD_ID,
       droppedLargeMedia: droppedIds.size,
-      snapshot: { ...snapshot, project, mediaItems, audioSettings: { ...snapshot.audioSettings, voiceover, music } },
+      snapshot: { ...snapshot, project, mediaItems, logo, audioSettings: { ...snapshot.audioSettings, voiceover, music } },
       mediaBlobs,
       voiceoverBlob,
       musicBlob,
+      logoBlob,
       savedAt: new Date().toISOString(),
     };
 
@@ -204,6 +220,7 @@ export async function loadStudioProject(): Promise<StudioSnapshot | null> {
       ...snap,
       mediaItems,
       audioSettings: { ...snap.audioSettings, voiceover, music },
+      logo: record.logoBlob && snap.logo ? { ...snap.logo, url: URL.createObjectURL(record.logoBlob) } : snap.logo,
       droppedLargeMedia: (record as any).droppedLargeMedia || 0,
     };
   } catch (err) {
