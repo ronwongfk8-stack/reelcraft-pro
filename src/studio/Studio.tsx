@@ -31,6 +31,8 @@ import {
   CaptionSegment,
   SceneTextOverlay,
   NarrationState,
+  LogoSettings,
+  DEFAULT_LOGO,
 } from './types';
 import { VideoCanvasPlayer } from './components/VideoCanvasPlayer';
 import { MediaUploader } from './components/MediaUploader';
@@ -142,6 +144,7 @@ export function Studio({
   const [isSidePanelOpen, setIsSidePanelOpen] = useState<boolean>(false);
   const [isNarrationOpen, setIsNarrationOpen] = useState<boolean>(false);
   const [narration, setNarration] = useState<NarrationState | null>(null);
+  const [logo, setLogo] = useState<LogoSettings>(DEFAULT_LOGO);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
   const [colorFilter, setColorFilter] = useState<ColorFilterType>('natural');
   const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('beast-glow');
@@ -206,6 +209,7 @@ export function Studio({
           setVoicePersona(saved.voicePersona);
           setSubtitleConfig(saved.subtitleConfig);
           setNarration(saved.narration || null);
+          setLogo(saved.logo || DEFAULT_LOGO);
           setProject(saved.project);
           setSelectedClipId(saved.project.clips[0]?.id);
           if (saved.droppedLargeMedia) {
@@ -223,7 +227,7 @@ export function Studio({
 
   // ---- Autosave (debounced) so a reload or the Stripe round-trip never loses the user's work ----
   const snapshotRef = useRef<any>(null);
-  snapshotRef.current = { prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig, narration };
+  snapshotRef.current = { prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig, narration, logo };
 
   const saveNow = useCallback(async () => {
     const snap = snapshotRef.current;
@@ -243,7 +247,7 @@ export function Studio({
     }
     const timeout = setTimeout(saveNow, 1500);
     return () => clearTimeout(timeout);
-  }, [hasRestoreChecked, prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig, narration, saveNow]);
+  }, [hasRestoreChecked, prompt, project, mediaItems, audioSettings, aspectRatio, colorFilter, captionStyle, preferredTransition, preferredMotion, voicePersona, subtitleConfig, narration, logo, saveNow]);
 
   // ---- Credit gate: one credit per export, same rule as before ----
   const handleBeforeExport = async (): Promise<boolean> => {
@@ -311,6 +315,16 @@ export function Studio({
     const voiced = !!narration?.voicedText && narration.signature === clipSignature(project.clips);
     if (voiced && !window.confirm('Auto-Cut will re-time your scenes and the AI voiceover will no longer match each photo. Continue?')) return;
     handleGenerateVideo(prompt, mediaItems, audioSettings);
+  };
+
+  const handleUpdateLogo = (patch: Partial<LogoSettings>) => {
+    setLogo((prev) => {
+      // free the memory of the previous file when it is replaced or removed
+      if (patch.url !== undefined && prev.url && prev.url !== patch.url && prev.url.startsWith('blob:')) {
+        URL.revokeObjectURL(prev.url);
+      }
+      return { ...prev, ...patch };
+    });
   };
 
   const openNarration = () => {
@@ -752,6 +766,7 @@ export function Studio({
             isGenerating={isGenerating}
             generationStep={generationStep}
             onBeforeExport={handleBeforeExport}
+            logo={logo}
           />
         </div>
 
@@ -830,6 +845,8 @@ export function Studio({
         isOpen={isSidePanelOpen}
         onClose={() => setIsSidePanelOpen(false)}
         onOpenNarration={openNarration}
+        logo={logo}
+        onUpdateLogo={handleUpdateLogo}
         audioSettings={audioSettings}
         onUpdateAudio={(updated) => setAudioSettings((prev) => ({ ...prev, ...updated }))}
         aspectRatio={aspectRatio}

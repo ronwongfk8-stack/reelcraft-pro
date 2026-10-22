@@ -24,6 +24,8 @@ import {
   Type,
   MessageSquare,
   RotateCcw,
+  ImagePlus,
+  Trash2,
 } from 'lucide-react';
 import {
   AudioSettings,
@@ -37,6 +39,8 @@ import {
   CaptionFontStyle,
   TimelineClip,
   SceneTextOverlay,
+  LogoSettings,
+  LogoPosition,
 } from '../types';
 import { audioEngine } from '../utils/audioEngine';
 import { MUSIC_PRESETS, TRANSITION_DESCRIPTIONS } from '../utils/sampleData';
@@ -63,6 +67,8 @@ interface SideControlPanelProps {
   onVoicePersonaChange: (persona: string) => void;
   onVoiceoverTranscribed?: (transcript: string) => void;
   onOpenNarration?: () => void;
+  logo?: LogoSettings;
+  onUpdateLogo?: (patch: Partial<LogoSettings>) => void;
   currentClip?: TimelineClip;
   currentClipIndex?: number;
   onUpdateCurrentClipTextOverlay?: (overlay: SceneTextOverlay | undefined) => void;
@@ -89,12 +95,15 @@ const SideControlPanelComponent: React.FC<SideControlPanelProps> = ({
   onVoicePersonaChange,
   onVoiceoverTranscribed,
   onOpenNarration,
+  logo,
+  onUpdateLogo,
   currentClip,
   currentClipIndex = 0,
   onUpdateCurrentClipTextOverlay,
 }) => {
   // Collapsible dropdown menu states
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    logo: false,
     audio: false,
     transitions: false,
     effects: false,
@@ -107,6 +116,23 @@ const SideControlPanelComponent: React.FC<SideControlPanelProps> = ({
 
   const toggleSection = (section: string) => {
     setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
+
+  const logoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [logoNotice, setLogoNotice] = useState<string | null>(null);
+
+  const handleLogoFile = (file: File | undefined | null) => {
+    if (!file || !onUpdateLogo) return;
+    setLogoNotice(null);
+    if (!/^image\/(png|jpe?g|webp|gif|svg\+xml)$/i.test(file.type)) {
+      setLogoNotice('Please choose a PNG, JPG, WebP or SVG image.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setLogoNotice('That file is over 5 MB. Please use a smaller logo.');
+      return;
+    }
+    onUpdateLogo({ url: URL.createObjectURL(file), name: file.name });
   };
 
   const voiceFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -312,6 +338,159 @@ const SideControlPanelComponent: React.FC<SideControlPanelProps> = ({
 
         {/* Scrollable Accordion Content */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {/* 0. LOGO SECTION */}
+          {onUpdateLogo && logo && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 overflow-hidden">
+              <button
+                onClick={() => toggleSection('logo')}
+                className="w-full flex items-center justify-between p-3.5 text-xs font-bold text-slate-200 hover:bg-slate-800/60 transition-colors cursor-pointer"
+              >
+                <div className="flex items-center space-x-2">
+                  <ImagePlus className="w-4 h-4 text-amber-400" />
+                  <span>Logo</span>
+                  {logo.url && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-700/50 font-mono">
+                      On
+                    </span>
+                  )}
+                </div>
+                {openSections.logo ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+              </button>
+
+              {openSections.logo && (
+                <div className="p-3.5 pt-3 border-t border-slate-800/80 space-y-3 text-xs">
+                  <input
+                    ref={logoFileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                    className="hidden"
+                    onChange={(e) => {
+                      handleLogoFile((e.target as HTMLInputElement).files?.[0]);
+                      if (logoFileInputRef.current) logoFileInputRef.current.value = '';
+                    }}
+                  />
+
+                  {!logo.url ? (
+                    <button
+                      onClick={() => logoFileInputRef.current?.click()}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        handleLogoFile(e.dataTransfer.files?.[0]);
+                      }}
+                      className="w-full flex flex-col items-center justify-center space-y-1 py-5 rounded-xl border-2 border-dashed border-slate-700 hover:border-amber-500/70 bg-slate-900/60 text-slate-300 hover:text-amber-200 transition-colors cursor-pointer"
+                    >
+                      <Upload className="w-4 h-4" />
+                      <span className="font-semibold">Upload your logo</span>
+                      <span className="text-[10px] text-slate-500">PNG with a transparent background works best</span>
+                    </button>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2.5">
+                        <div
+                          className="w-14 h-14 shrink-0 rounded-lg border border-slate-700 overflow-hidden flex items-center justify-center"
+                          style={{
+                            backgroundColor: '#0f172a',
+                            backgroundImage:
+                              'linear-gradient(45deg,#1e293b 25%,transparent 25%),linear-gradient(-45deg,#1e293b 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#1e293b 75%),linear-gradient(-45deg,transparent 75%,#1e293b 75%)',
+                            backgroundSize: '10px 10px',
+                            backgroundPosition: '0 0,0 5px,5px -5px,-5px 0',
+                          }}
+                        >
+                          <img src={logo.url} alt="Your logo" className="max-w-full max-h-full object-contain" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[11px] text-slate-200 font-semibold truncate">{logo.name || 'Logo'}</div>
+                          <div className="flex items-center gap-1.5 mt-1.5">
+                            <button
+                              onClick={() => logoFileInputRef.current?.click()}
+                              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold cursor-pointer"
+                            >
+                              Replace
+                            </button>
+                            <button
+                              onClick={() => onUpdateLogo({ url: null, name: '' })}
+                              aria-label="Remove logo"
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-600 text-slate-300 hover:text-white cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <span className="text-slate-400 block font-semibold">Position</span>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {(
+                            [
+                              ['top-left', 'Top left'],
+                              ['top-right', 'Top right'],
+                              ['bottom-left', 'Bottom left'],
+                              ['bottom-right', 'Bottom right'],
+                            ] as [LogoPosition, string][]
+                          ).map(([pos, label]) => (
+                            <button
+                              key={pos}
+                              onClick={() => onUpdateLogo({ position: pos })}
+                              className={`py-1.5 rounded-lg border text-[11px] font-semibold transition-colors cursor-pointer ${
+                                logo.position === pos
+                                  ? 'bg-amber-500/20 border-amber-500 text-amber-200'
+                                  : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-600'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="flex items-center justify-between text-slate-400 font-semibold">
+                          <span>Size</span>
+                          <span className="font-mono text-slate-300">{Math.round(logo.size)}%</span>
+                        </label>
+                        <input
+                          type="range"
+                          min={4}
+                          max={40}
+                          step={1}
+                          value={logo.size}
+                          onChange={(e) => onUpdateLogo({ size: Number(e.target.value) })}
+                          className="w-full accent-amber-400 cursor-pointer"
+                          aria-label="Logo size"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="flex items-center justify-between text-slate-400 font-semibold">
+                          <span>Opacity</span>
+                          <span className="font-mono text-slate-300">{Math.round(logo.opacity * 100)}%</span>
+                        </label>
+                        <input
+                          type="range"
+                          min={20}
+                          max={100}
+                          step={5}
+                          value={Math.round(logo.opacity * 100)}
+                          onChange={(e) => onUpdateLogo({ opacity: Number(e.target.value) / 100 })}
+                          className="w-full accent-amber-400 cursor-pointer"
+                          aria-label="Logo opacity"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {logoNotice && (
+                    <p className="text-[11px] text-amber-300 bg-amber-950/50 border border-amber-800/60 rounded-lg px-2.5 py-1.5">
+                      {logoNotice}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 1. AUDIO SECTION */}
           <div className="rounded-xl border border-slate-800 bg-slate-950/70 overflow-hidden">
             <button
