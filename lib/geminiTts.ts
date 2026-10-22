@@ -64,6 +64,35 @@ function pcmToWav(pcmData: Buffer, sampleRate = 24000, channels = 1, bitsPerSamp
   return Buffer.concat([header, pcmData]);
 }
 
+const DEFAULT_TTS_MODEL = 'models/gemini-2.5-flash-preview-tts';
+
+// Remembered for the lifetime of a warm server instance
+let workingModel: string | null = null;
+let discoveredModels: string[] | null = null;
+
+// Messages Google uses when a model name does not exist / is retired / is not supported for this call
+const MODEL_MISSING = /\b404\b|NOT_FOUND|not found|is not supported|no longer available|deprecated|retired|unsupported model/i;
+
+/** Asks Google which models this API key can use and keeps the text-to-speech ones (flash first, stable before preview). */
+async function discoverTtsModels(ai: GoogleGenAI): Promise<string[]> {
+  if (discoveredModels) return discoveredModels;
+  const found: string[] = [];
+  try {
+    const pager: any = await (ai.models as any).list({ config: { pageSize: 100 } });
+    for await (const m of pager) {
+      const name: string = m?.name || '';
+      if (/tts/i.test(name) && !/live|native-audio|dialog/i.test(name)) found.push(name);
+    }
+  } catch (e: any) {
+    console.error('Could not list Gemini models:', String(e?.message || e).slice(0, 200));
+  }
+  const score = (n: string) => (/flash/i.test(n) ? 0 : 2) + (/preview/i.test(n) ? 1 : 0);
+  found.sort((x, y) => score(x) - score(y));
+  console.info('Discovered TTS models:', found.join(', ') || '(none)');
+  discoveredModels = found;
+  return found;
+}
+
 export async function synthesizeGeminiVoiceover({ text, voice }: SynthesizeParams): Promise<SynthesizeResult> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -81,40 +110,65 @@ export async function synthesizeGeminiVoiceover({ text, voice }: SynthesizeParam
   // only the instructed speech, it doesn't read the instruction aloud.
   const styledText = `Say the following in a ${voice.tone.toLowerCase()} voice: ${text}`;
 
-  // Gemini's preview TTS model occasionally answers with no audio (or a transient 5xx/429). A couple of quick
-  // retries makes that invisible to the user instead of surfacing as an error.
-  const MAX_ATTEMPTS = 3;
+  // Which TTS model to use: an override from the environment (GEMINI_TTS_MODEL), then the model this app was built
+  // with. Preview models get renamed or retired over time, so if Google reports the model as missing we look up
+  // which TTS models this API key can actually use and try those instead (and remember the one that works).
+  const configured = [process.env.GEMINI_TTS_MODEL, DEFAULT_TTS_MODEL].filter((m): m is string => !!m);
+  const tried = new Set<string>();
   let inlineData: { data?: string; mimeType?: string } | undefined;
   let lastError: Error | null = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS && !inlineData?.data; attempt++) {
-    try {
-      const response = await ai.models.generateContent({
-        model: 'models/gemini-2.5-flash-preview-tts',
-        contents: [{ parts: [{ text: styledText }] }],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
+  const attemptModel = async (model: string): Promise<'ok' | 'missing' | 'failed'> => {
+    tried.add(model);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [{ parts: [{ text: styledText }] }],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName },
+              },
             },
           },
-        },
-      } as any);
+        } as any);
 
-      const parts: any[] = (response as any)?.candidates?.[0]?.content?.parts || [];
-      inlineData = parts.find((p) => p?.inlineData?.data)?.inlineData;
-      if (!inlineData?.data) {
+        const parts: any[] = (response as any)?.candidates?.[0]?.content?.parts || [];
+        inlineData = parts.find((p) => p?.inlineData?.data)?.inlineData;
+        if (inlineData?.data) {
+          workingModel = model;
+          return 'ok';
+        }
         const reason = (response as any)?.candidates?.[0]?.finishReason;
         lastError = new Error(`Gemini TTS returned no audio data${reason ? ` (finishReason: ${reason})` : ''}.`);
+      } catch (err: any) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (MODEL_MISSING.test(lastError.message)) return 'missing';
+        // 429 means "slow down": waiting a few hundred ms won't help, so don't burn the request budget on it
+        if (/429|RESOURCE_EXHAUSTED/i.test(lastError.message)) return 'failed';
+        if (!/500|503|UNAVAILABLE|INTERNAL|fetch failed|timeout/i.test(lastError.message)) return 'failed';
       }
-    } catch (err: any) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      const transient = /429|500|503|UNAVAILABLE|INTERNAL|RESOURCE_EXHAUSTED|fetch failed|timeout/i.test(lastError.message);
-      if (!transient) break;
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 600 * attempt));
     }
-    if (!inlineData?.data && attempt < MAX_ATTEMPTS) {
-      await new Promise((r) => setTimeout(r, 600 * attempt));
+    return 'failed';
+  };
+
+  const order = workingModel ? [workingModel, ...configured.filter((m) => m !== workingModel)] : configured;
+  let needDiscovery = false;
+  for (const model of order) {
+    const outcome = await attemptModel(model);
+    if (outcome === 'ok') break;
+    if (outcome === 'missing') needDiscovery = true;
+    if (outcome === 'failed') break; // a real error (quota, key, outage): another model won't fix that
+  }
+
+  if (!inlineData?.data && needDiscovery) {
+    for (const model of await discoverTtsModels(ai)) {
+      if (tried.has(model)) continue;
+      const outcome = await attemptModel(model);
+      if (outcome === 'ok' || outcome === 'failed') break;
     }
   }
 

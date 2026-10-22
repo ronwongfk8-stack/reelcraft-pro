@@ -488,8 +488,10 @@ class WebAudioEngine {
     signal?: AbortSignal
   ): Promise<{ pcm: Uint8Array; sampleRate: number }> {
     let lastError = '';
+    let rateLimited = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       if (signal?.aborted) throw new Error('Cancelled');
+      rateLimited = false;
       try {
         const res = await fetch('/api/voiceover/generate', {
           method: 'POST',
@@ -502,12 +504,14 @@ class WebAudioEngine {
           return readWav(base64ToBytes(json.audioBase64));
         }
         lastError = json?.error || `Voice service returned ${res.status}`;
+        rateLimited = res.status === 429;
+        if (['spend_cap', 'key', 'model', 'no_key'].includes(json?.code)) break; // waiting will not fix these
         if (res.status < 500 && res.status !== 429) break; // not worth retrying (bad request etc.)
       } catch (e: any) {
         if (e?.name === 'AbortError') throw new Error('Cancelled');
         lastError = e?.message || 'Network error while generating the voiceover.';
       }
-      if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt));
+      if (attempt < 3) await new Promise((r) => setTimeout(r, (rateLimited ? 4000 : 700) * attempt));
     }
     throw new Error(lastError || 'Voice generation failed.');
   }
@@ -573,7 +577,7 @@ class WebAudioEngine {
     duration: number;
     scenes: { sceneStart: number; sceneDuration: number; voiceStart: number; voiceDuration: number }[];
   }> {
-    const { onProgress, signal, concurrency = 2, leadIn = 0.25, firstLeadIn = 0.4, gap = 0.4, minScene = 2.5 } = opts;
+    const { onProgress, signal, concurrency = 1, leadIn = 0.25, firstLeadIn = 0.4, gap = 0.4, minScene = 2.5 } = opts;
     const voice = this.resolveVoice(voiceId);
     if (lines.length === 0) throw new Error('There are no scenes to voice.');
 

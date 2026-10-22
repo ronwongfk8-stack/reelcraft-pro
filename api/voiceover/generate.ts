@@ -1,6 +1,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { synthesizeGeminiVoiceover } from '../../lib/geminiTts.js';
 
+// Gemini speech can take a few seconds per request; allow time for a retry
+export const config = { maxDuration: 60 };
+
 const MAX_TEXT_LENGTH = 5000;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -35,15 +38,46 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     res.status(200).json({ success: true, audioBase64: result.audioBase64, mimeType: result.mimeType });
   } catch (err: any) {
-    console.error('Voiceover generation failed:', err.message);
-    const isConfigError = err.message?.includes('not configured');
-    // Error details only reach the browser when DEBUG_TTS=1 is set in Vercel's environment variables
-    // (turn it on temporarily when investigating, then remove it - stack traces shouldn't be public).
+    // The full error always goes to the Vercel function logs...
+    console.error('Voiceover generation failed:', err?.message);
+    // ...while the browser gets a short, specific, safe reason (details only with DEBUG_TTS=1).
+    const { status, code, message } = classifyTtsError(String(err?.message || ''));
     const debug = process.env.DEBUG_TTS === '1';
-    res.status(isConfigError ? 503 : 500).json({
+    res.status(status).json({
       success: false,
-      error: debug || isConfigError ? err.message || 'Unable to generate voiceover.' : 'Unable to generate voiceover right now. Please try again in a moment.',
-      ...(debug ? { debugStack: err.stack } : {}),
+      code,
+      error: message,
+      ...(debug ? { debugMessage: err?.message, debugStack: err?.stack } : {}),
     });
   }
+}
+
+const UNAVAILABLE = 'AI voiceover is temporarily unavailable. Please try again later.';
+
+// Customers only ever see short, safe messages. Billing / key / model problems are the owner's to fix, so they get
+// a neutral line here and the full detail in the Vercel logs (or in the response when DEBUG_TTS=1).
+function classifyTtsError(msg: string): { status: number; code: string; message: string } {
+  if (/not configured|missing GEMINI_API_KEY/i.test(msg)) {
+    return { status: 503, code: 'no_key', message: UNAVAILABLE };
+  }
+  if (/spending cap|spend cap|billing/i.test(msg)) {
+    // a monthly cap does not clear by waiting a minute, so tell the client not to keep retrying
+    return { status: 503, code: 'spend_cap', message: UNAVAILABLE };
+  }
+  if (/429|RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(msg)) {
+    return { status: 429, code: 'quota', message: 'The voice service is busy right now. Please wait a minute and try again.' };
+  }
+  if (/API key|API_KEY_INVALID|PERMISSION_DENIED|\b401\b|\b403\b|UNAUTHENTICATED/i.test(msg)) {
+    return { status: 503, code: 'key', message: UNAVAILABLE };
+  }
+  if (/\b404\b|NOT_FOUND|not found|is not supported|deprecated|retired/i.test(msg)) {
+    return { status: 503, code: 'model', message: UNAVAILABLE };
+  }
+  if (/no audio data/i.test(msg)) {
+    return { status: 502, code: 'no_audio', message: 'The voice service returned no audio for this text. Try again, or reword the line.' };
+  }
+  if (/\b400\b|INVALID_ARGUMENT/i.test(msg)) {
+    return { status: 502, code: 'rejected', message: 'The voice service rejected this text or voice setting.' };
+  }
+  return { status: 500, code: 'unknown', message: 'Unable to generate voiceover right now. Please try again in a moment.' };
 }
