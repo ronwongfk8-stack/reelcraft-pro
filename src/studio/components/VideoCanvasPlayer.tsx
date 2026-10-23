@@ -23,6 +23,7 @@ import { VideoProject, MediaItem, AudioSettings, TransitionType, MotionType, Col
   LogoSettings,
 } from '../types';
 import { audioEngine } from '../utils/audioEngine';
+import { withScriptFonts, isRtlText, ensureFontsForText } from '../utils/scriptFonts';
 
 interface VideoCanvasPlayerProps {
   project: VideoProject;
@@ -79,11 +80,12 @@ function hexToRgba(hex: string, alpha: number): string {
 }
 
 function getFontFamily(fontStyle?: string): string {
-  if (fontStyle === 'serif') return '"Playfair Display", Georgia, serif';
-  if (fontStyle === 'mono') return '"JetBrains Mono", "Courier New", monospace';
-  if (fontStyle === 'impact') return 'Impact, "Arial Black", sans-serif';
-  if (fontStyle === 'rounded') return '"Comic Sans MS", "Plus Jakarta Sans", cursive, sans-serif';
-  return '"Plus Jakarta Sans", -apple-system, sans-serif';
+  // withScriptFonts adds Chinese / Japanese / Korean / Arabic / Thai / Hindi / Tamil fallbacks for non-Latin text
+  if (fontStyle === 'serif') return withScriptFonts('"Playfair Display", Georgia, serif');
+  if (fontStyle === 'mono') return withScriptFonts('"JetBrains Mono", "Courier New", monospace');
+  if (fontStyle === 'impact') return withScriptFonts('Impact, "Arial Black", sans-serif');
+  if (fontStyle === 'rounded') return withScriptFonts('"Comic Sans MS", "Plus Jakarta Sans", cursive, sans-serif');
+  return withScriptFonts('"Plus Jakarta Sans", -apple-system, sans-serif');
 }
 
 function getTextEffectStyles(effect?: string, color: string = '#FFFFFF'): React.CSSProperties {
@@ -489,6 +491,21 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
   useEffect(() => {
     (document as any).fonts?.ready?.then(() => setAssetTick((t) => t + 1));
   }, []);
+
+  // Fonts for non-Latin scripts (Chinese, Arabic, Thai...) must be loaded before canvas text can use them
+  const allVideoText = [
+    ...(project.captions || []).map((c) => c.text),
+    ...(project.clips || []).map((c) => c.textOverlay?.text || ''),
+  ].join(' ');
+  useEffect(() => {
+    let cancelled = false;
+    ensureFontsForText(allVideoText).then((changed) => {
+      if (changed && !cancelled) setAssetTick((t) => t + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [allVideoText]);
 
   // Track the rendered width of the preview so on-screen text matches canvas text size
   useEffect(() => {
@@ -899,12 +916,14 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
     const fontSize = Math.max(16, Math.round(baseFontSize * scaleFactor));
 
     const fontFamily = getFontFamily(overlay.fontStyle);
+    const rtlProbe = overlay.text || '';
     let fontWeight = '800';
     if (overlay.fontStyle === 'serif') fontWeight = '700 italic';
     else if (overlay.fontStyle === 'impact') fontWeight = '900';
     else if (overlay.fontStyle === 'mono') fontWeight = '700';
 
     ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    ctx.direction = isRtlText(rtlProbe) ? 'rtl' : 'ltr';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineJoin = 'round';
@@ -1082,6 +1101,8 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
     const baseFontSize = subConfig.fontSize || 28;
     const fontSize = Math.max(16, Math.round(baseFontSize * scaleFactor));
 
+    const rtlProbe = text;
+
     // Font Family Selection
     let fontFamily = '"Plus Jakarta Sans", sans-serif';
     let fontWeight = '800';
@@ -1101,8 +1122,10 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
       fontFamily = '"Plus Jakarta Sans", -apple-system, sans-serif';
       fontWeight = '700';
     }
+    fontFamily = withScriptFonts(fontFamily);
 
     ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    ctx.direction = isRtlText(rtlProbe) ? 'rtl' : 'ltr';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineJoin = 'round';
@@ -1296,11 +1319,23 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
 
     // 4. ANIMATION: KARAOKE (Progressive Word-By-Word Highlight)
     if (animStyle === 'karaoke') {
-      const words = text.split(/\s+/);
+      // Words: split on spaces; languages written without spaces (Chinese, Japanese, Thai) use the browser's
+      // word segmenter instead, and Arabic is laid out right-to-left.
+      const rtl = isRtlText(text);
+      const spaced = /\s/.test(text.trim());
+      let words: string[] = text.split(/\s+/);
+      if (!spaced && text.length > 3 && typeof Intl !== 'undefined' && (Intl as any).Segmenter) {
+        try {
+          const segs = Array.from((new (Intl as any).Segmenter(undefined, { granularity: 'word' })).segment(text)).map((x: any) => x.segment as string);
+          if (segs.length > 1) words = segs;
+        } catch {
+          /* keep the single block */
+        }
+      }
       const activeWordIdx = Math.min(words.length - 1, Math.floor(progress * words.length));
 
       // Calculate total width with word spacing
-      const spaceWidth = ctx.measureText(' ').width;
+      const spaceWidth = spaced ? ctx.measureText(' ').width : 0;
       const wordMetrics = words.map((w) => ctx.measureText(w).width);
       const totalTextWidth = wordMetrics.reduce((sum, w) => sum + w, 0) + spaceWidth * (words.length - 1);
 
@@ -1315,7 +1350,11 @@ export const VideoCanvasPlayer: React.FC<VideoCanvasPlayerProps> = ({
       ctx.textAlign = 'left';
       let currentX = width / 2 - totalTextWidth / 2;
 
-      words.forEach((word, idx) => {
+      const order = words.map((_, i) => i);
+      if (rtl) order.reverse(); // first word sits on the right
+
+      order.forEach((idx) => {
+        const word = words[idx];
         const isCurrent = idx === activeWordIdx;
         const isPast = idx < activeWordIdx;
 

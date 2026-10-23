@@ -205,7 +205,11 @@ export interface NarrationState {
   industry: string;
   facts: Record<string, string>;
   voiceId: string;
-  lines: { clipId: string; sees?: string; line: string }[];
+  lines: { clipId: string; sees?: string; line: string; meaning?: string; meaningOf?: string }[];
+  /** BCP-47 code from lib/languages.ts (missing = English) */
+  language?: string;
+  /** Language the current lines are actually written in (can differ from `language` until they are translated) */
+  linesLanguage?: string;
   /** Order of clips when the lines were written. If the photos change, the lines are out of date. */
   signature: string;
   /** The exact text that was last turned into audio (so we know when lines were edited afterwards). */

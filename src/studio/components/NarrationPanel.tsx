@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { X, Mic, ChevronDown, ChevronRight, Play, Square, Check, Loader2, RefreshCw, Sparkles, AlertTriangle } from 'lucide-react';
+import { X, Mic, ChevronDown, ChevronRight, Play, Square, Check, Loader2, RefreshCw, Sparkles, AlertTriangle, Languages } from 'lucide-react';
 import { MALE_VOICES, FEMALE_VOICES } from '../../data/voiceData';
 import { INDUSTRY_FORMS, getIndustryForm } from '../data/industryForms';
 import { audioEngine } from '../utils/audioEngine';
-import { captureThumbnail, clipSignature, requestNarration, MAX_NARRATION_SCENES } from '../utils/narration';
+import { captureThumbnail, clipSignature, requestNarration, requestTranslation, MAX_NARRATION_SCENES } from '../utils/narration';
+import { NARRATION_LANGUAGES, getLanguage, isEnglish, DEFAULT_LANGUAGE } from '../../../lib/languages';
 import { MediaItem, NarrationState, TimelineClip } from '../types';
 
 export interface ApplyNarrationResult {
@@ -11,6 +12,7 @@ export interface ApplyNarrationResult {
   audioUrl: string;
   audioDuration: number;
   voiceId: string;
+  language: string;
   state: NarrationState;
 }
 
@@ -24,10 +26,21 @@ interface NarrationPanelProps {
   defaultVoiceId: string;
   onChange: (state: NarrationState) => void;
   onApply: (result: ApplyNarrationResult) => void;
+  /** Translated on-screen titles, keyed by clip id */
+  onApplyTitles?: (titles: Record<string, string>, language: string) => void;
 }
 
 // Voice samples are generated once per voice and kept for the rest of the session
 const sampleCache = new Map<string, string>();
+
+const LANG_KEY = 'reelcraft_narration_language';
+const rememberedLanguage = (): string => {
+  try {
+    return getLanguage(window.localStorage.getItem(LANG_KEY)).code;
+  } catch {
+    return DEFAULT_LANGUAGE;
+  }
+};
 
 const ALL_VOICES = [...MALE_VOICES, ...FEMALE_VOICES];
 
@@ -41,17 +54,21 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
   defaultVoiceId,
   onChange,
   onApply,
+  onApplyTitles,
 }) => {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [industry, setIndustry] = useState(defaultIndustry);
   const [facts, setFacts] = useState<Record<string, string>>({});
   const [showMore, setShowMore] = useState(false);
   const [voiceId, setVoiceId] = useState(defaultVoiceId);
-  const [lines, setLines] = useState<Record<string, { sees: string; line: string }>>({});
+  const [lines, setLines] = useState<Record<string, { sees: string; line: string; meaning?: string; meaningOf?: string }>>({});
+  const [language, setLanguage] = useState<string>(DEFAULT_LANGUAGE);
+  const [linesLanguage, setLinesLanguage] = useState<string>(DEFAULT_LANGUAGE);
+  const [showMeaning, setShowMeaning] = useState(true);
   const [lineSignature, setLineSignature] = useState('');
   const [voicedText, setVoicedText] = useState<string | undefined>(undefined);
 
-  const [phase, setPhase] = useState<'idle' | 'writing' | 'voicing'>('idle');
+  const [phase, setPhase] = useState<'idle' | 'writing' | 'voicing' | 'translating'>('idle');
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
   const [writeSource, setWriteSource] = useState<'gemini' | 'basic' | null>(null);
@@ -63,6 +80,8 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
   const abortRef = useRef<AbortController | null>(null);
 
   const form = getIndustryForm(industry);
+  const lang = getLanguage(language);
+  const linesLang = getLanguage(linesLanguage);
 
   // Scenes = clips (in timeline order) whose picture still exists
   const scenes = useMemo(
@@ -77,6 +96,8 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
   const isStale = hasLines && lineSignature !== '' && lineSignature !== signature;
   const currentText = scenes.map((s) => (lines[s.clip.id]?.line || '').trim()).join('\n');
   const isVoiced = !!voicedText && voicedText === currentText && !isStale;
+  // the lines are in one language, but a different one is now selected: they need translating (or rewriting)
+  const languageMismatch = hasLines && linesLang.code !== lang.code;
 
   // ---- Load saved state whenever the panel is opened ----
   useEffect(() => {
@@ -84,9 +105,11 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
     if (value) {
       setIndustry(value.industry || defaultIndustry);
       setFacts(value.facts || {});
+      setLanguage(getLanguage(value.language || rememberedLanguage()).code);
+      setLinesLanguage(getLanguage(value.linesLanguage || value.language).code);
       setVoiceId(value.voiceId || defaultVoiceId);
-      const map: Record<string, { sees: string; line: string }> = {};
-      value.lines.forEach((l) => (map[l.clipId] = { sees: l.sees || '', line: l.line }));
+      const map: Record<string, { sees: string; line: string; meaning?: string; meaningOf?: string }> = {};
+      value.lines.forEach((l) => (map[l.clipId] = { sees: l.sees || '', line: l.line, meaning: l.meaning, meaningOf: l.meaningOf }));
       setLines(map);
       setLineSignature(value.signature || '');
       setVoicedText(value.voicedText);
@@ -94,6 +117,7 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
     } else {
       setIndustry(defaultIndustry);
       setVoiceId(defaultVoiceId);
+      setLanguage(rememberedLanguage());
       setStep(1);
     }
     setError(null);
@@ -108,16 +132,27 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
         industry,
         facts,
         voiceId,
+        language,
+        linesLanguage,
         lines: scenes
           .filter((s) => lines[s.clip.id])
-          .map((s) => ({ clipId: s.clip.id, sees: lines[s.clip.id].sees, line: lines[s.clip.id].line })),
+          .map((s) => ({ clipId: s.clip.id, sees: lines[s.clip.id].sees, line: lines[s.clip.id].line, meaning: lines[s.clip.id].meaning, meaningOf: lines[s.clip.id].meaningOf })),
         signature: lineSignature,
         voicedText,
       });
     }, 500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [industry, facts, voiceId, lines, lineSignature, voicedText, isOpen]);
+  }, [industry, facts, voiceId, language, linesLanguage, lines, lineSignature, voicedText, isOpen]);
+
+  const chooseLanguage = (code: string) => {
+    setLanguage(code);
+    try {
+      window.localStorage.setItem(LANG_KEY, code);
+    } catch {
+      /* private mode: just don't remember */
+    }
+  };
 
   // stop any sample / generation when the panel closes
   useEffect(() => {
@@ -138,12 +173,14 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
     sampleAudioRef.current?.pause();
     setSamplePlaying(null);
     try {
-      let url = sampleCache.get(`${id}|${form.id}`);
+      const sampleText = isEnglish(lang.code) ? form.sample : lang.sample;
+      const cacheKey = `${id}|${lang.code}|${isEnglish(lang.code) ? form.id : '-'}`;
+      let url = sampleCache.get(cacheKey);
       if (!url) {
         setSampleLoading(id);
-        const r = await audioEngine.generateVoiceoverAudio(form.sample, id);
+        const r = await audioEngine.generateVoiceoverAudio(sampleText, id, isEnglish(lang.code) ? undefined : lang.code);
         url = r.url;
-        sampleCache.set(`${id}|${form.id}`, url);
+        sampleCache.set(cacheKey, url);
       }
       const a = new Audio(url);
       sampleAudioRef.current = a;
@@ -173,15 +210,48 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
           image: await captureThumbnail(media, clip.trimStart || 0),
         }))
       );
-      const result = await requestNarration({ industry, facts, scenes: request });
-      const map: Record<string, { sees: string; line: string }> = {};
-      result.scenes.forEach((s) => (map[s.id] = { sees: s.sees || '', line: s.line }));
+      const result = await requestNarration({ industry, facts, scenes: request, language: lang.code });
+      const map: Record<string, { sees: string; line: string; meaning?: string; meaningOf?: string }> = {};
+      result.scenes.forEach((s) => (map[s.id] = { sees: s.sees || '', line: s.line, meaning: s.meaning, meaningOf: s.meaning ? s.line : undefined }));
       setLines(map);
+      // the basic draft is built from the form text only, so it is in whatever language the form was typed in
+      setLinesLanguage(result.source === 'gemini' ? lang.code : DEFAULT_LANGUAGE);
       setLineSignature(signature);
       setVoicedText(undefined);
       setWriteSource(result.source);
     } catch (e: any) {
       setError(e?.message || "Couldn't write the narration.");
+    } finally {
+      setPhase('idle');
+    }
+  };
+
+  // ---- Translate the existing lines (and on-screen titles). Each line keeps its own photo. ----
+  const translateLines = async () => {
+    const items = scenes.filter((s) => lines[s.clip.id]?.line?.trim()).map((s) => ({ id: s.clip.id, text: lines[s.clip.id].line }));
+    if (items.length === 0) return;
+    const titles = scenes
+      .filter((s) => s.clip.textOverlay?.enabled && s.clip.textOverlay.text)
+      .map((s) => ({ id: s.clip.id, text: s.clip.textOverlay!.text }));
+    setError(null);
+    setPhase('translating');
+    try {
+      const result = await requestTranslation({ language: lang.code, lines: items, titles });
+      const map = { ...lines };
+      result.lines.forEach((l) => {
+        map[l.id] = { sees: map[l.id]?.sees || '', line: l.line, meaning: l.meaning, meaningOf: l.line };
+      });
+      setLines(map);
+      setLinesLanguage(lang.code);
+      setLineSignature(signature);
+      setVoicedText(undefined); // new words need new audio
+      if (titles.length && onApplyTitles) {
+        const t: Record<string, string> = {};
+        result.titles.forEach((x) => (t[x.id] = x.text));
+        onApplyTitles(t, lang.code);
+      }
+    } catch (e: any) {
+      setError(e?.message || "Couldn't translate. Your text was not changed.");
     } finally {
       setPhase('idle');
     }
@@ -201,6 +271,7 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
     abortRef.current = controller;
     try {
       const track = await audioEngine.generateNarrationTrack(texts, voiceId, {
+        language: isEnglish(linesLang.code) ? undefined : linesLang.code,
         signal: controller.signal,
         onProgress: (done, total) => setProgress({ done, total }),
       });
@@ -209,7 +280,9 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
         industry,
         facts,
         voiceId,
-        lines: scenes.map((s, i) => ({ clipId: s.clip.id, sees: lines[s.clip.id]?.sees, line: texts[i] })),
+        language,
+        linesLanguage,
+        lines: scenes.map((s, i) => ({ clipId: s.clip.id, sees: lines[s.clip.id]?.sees, line: texts[i], meaning: lines[s.clip.id]?.meaning, meaningOf: lines[s.clip.id]?.meaningOf })),
         signature,
         voicedText: text,
       };
@@ -226,6 +299,7 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
         audioUrl: track.url,
         audioDuration: track.duration,
         voiceId,
+        language: linesLang.code,
         state,
       });
     } catch (e: any) {
@@ -360,6 +434,25 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
               </select>
             </div>
 
+            <div>
+              <label className="text-[10px] font-semibold text-slate-400 flex items-center space-x-1 mb-1">
+                <Languages className="w-3 h-3" />
+                <span>Narration language</span>
+              </label>
+              <select
+                value={language}
+                onChange={(e) => chooseLanguage(e.target.value)}
+                aria-label="Narration language"
+                className="w-full bg-slate-950 border border-slate-800 focus:border-pink-500 rounded-lg px-2.5 py-2 text-xs text-slate-100 focus:outline-none"
+              >
+                {NARRATION_LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.name === l.native || l.native === 'English' ? l.name : `${l.name} · ${l.native}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="grid grid-cols-2 gap-2.5">{mainFields.map(renderField)}</div>
 
             {moreFields.length > 0 && (
@@ -441,6 +534,53 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
               </div>
             )}
 
+            {phase !== 'writing' && hasLines && (
+              <div className="flex items-center gap-2">
+                <Languages className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <select
+                  value={language}
+                  onChange={(e) => chooseLanguage(e.target.value)}
+                  disabled={busy}
+                  aria-label="Language of the narration"
+                  className="flex-1 min-w-0 bg-slate-950 border border-slate-800 focus:border-pink-500 rounded-lg px-2 py-1.5 text-[11px] text-slate-100 focus:outline-none disabled:opacity-60"
+                >
+                  {NARRATION_LANGUAGES.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      {l.name === l.native || l.native === 'English' ? l.name : `${l.name} · ${l.native}`}
+                    </option>
+                  ))}
+                </select>
+                {!isEnglish(linesLang.code) && (
+                  <button
+                    onClick={() => setShowMeaning(!showMeaning)}
+                    className={`shrink-0 px-2 py-1.5 rounded-lg border text-[10px] font-semibold cursor-pointer ${
+                      showMeaning ? 'bg-pink-500/15 border-pink-500/60 text-pink-200' : 'bg-slate-900 border-slate-800 text-slate-400'
+                    }`}
+                    title="Show what each line says in English"
+                  >
+                    EN
+                  </button>
+                )}
+              </div>
+            )}
+
+            {phase !== 'writing' && languageMismatch && !isStale && (
+              <div className="text-[11px] text-amber-300 bg-amber-950/50 border border-amber-800/60 rounded-lg px-2.5 py-2 space-y-1.5">
+                <div className="flex items-center space-x-1.5">
+                  <Languages className="w-3.5 h-3.5 shrink-0" />
+                  <span>Translate these lines to {lang.name}?</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button onClick={translateLines} disabled={busy} className="font-bold underline cursor-pointer disabled:opacity-60">
+                    {phase === 'translating' ? 'Translating…' : 'Translate'}
+                  </button>
+                  <button onClick={writeNarration} disabled={busy} className="underline text-amber-200/80 cursor-pointer disabled:opacity-60">
+                    Rewrite from photos
+                  </button>
+                </div>
+              </div>
+            )}
+
             {phase !== 'writing' && isStale && (
               <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300 bg-amber-950/50 border border-amber-800/60 rounded-lg px-2.5 py-1.5">
                 <span className="flex items-center space-x-1.5">
@@ -477,16 +617,23 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
                         </span>
                       )}
                     </div>
-                    <textarea
-                      rows={4}
-                      value={entry?.line || ''}
-                      disabled={busy}
-                      onChange={(e) =>
-                        setLines({ ...lines, [clip.id]: { sees: entry?.sees || '', line: e.target.value } })
-                      }
-                      placeholder="Narration for this scene…"
-                      className="flex-1 min-w-0 bg-slate-950 border border-slate-800 focus:border-pink-500 rounded-lg p-2 text-[11px] leading-snug text-slate-100 placeholder-slate-600 focus:outline-none resize-none disabled:opacity-60"
-                    />
+                    <div className="flex-1 min-w-0">
+                      <textarea
+                        rows={4}
+                        dir={linesLang.rtl ? 'rtl' : 'ltr'}
+                        lang={linesLang.code}
+                        value={entry?.line || ''}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setLines({ ...lines, [clip.id]: { ...entry, sees: entry?.sees || '', line: e.target.value } })
+                        }
+                        placeholder="Narration for this scene…"
+                        className="w-full bg-slate-950 border border-slate-800 focus:border-pink-500 rounded-lg p-2 text-[11px] leading-snug text-slate-100 placeholder-slate-600 focus:outline-none resize-none disabled:opacity-60"
+                      />
+                      {showMeaning && !isEnglish(linesLang.code) && entry?.meaning && entry.meaningOf === entry.line && (
+                        <p className="mt-1 text-[10px] leading-snug text-slate-500 italic">{entry.meaning}</p>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -572,7 +719,7 @@ export const NarrationPanel: React.FC<NarrationPanelProps> = ({
               ) : (
                 <button
                   onClick={makeVoice}
-                  disabled={busy || !hasLines || tooMany}
+                  disabled={busy || !hasLines || tooMany || languageMismatch}
                   className="flex-1 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 disabled:opacity-50 text-white text-xs font-bold flex items-center justify-center space-x-1.5 cursor-pointer"
                 >
                   {phase === 'voicing' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mic className="w-3.5 h-3.5" />}

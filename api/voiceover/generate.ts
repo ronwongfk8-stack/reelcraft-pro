@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { synthesizeGeminiVoiceover } from '../../lib/geminiTts.js';
+import { getLanguage, isEnglish } from '../../lib/languages.js';
 
 // Gemini speech can take a few seconds per request; allow time for a retry
 export const config = { maxDuration: 60 };
@@ -11,7 +12,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { text, voiceId, gender, tone } = req.body || {};
+  const { text, voiceId, gender, tone, language } = req.body || {};
 
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ success: false, error: 'text is required' });
@@ -27,7 +28,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    // Only languages on our own list are used (anything else is ignored), so nothing from the browser reaches the prompt
+    const lang = getLanguage(language);
     const result = await synthesizeGeminiVoiceover({
+      language: isEnglish(lang.code) ? undefined : lang.ai,
       text: text.trim(),
       voice: {
         id: voiceId || '',

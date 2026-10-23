@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { Type } from '@google/genai';
 import { getGeminiClient, CANDIDATE_MODELS } from '../lib/gemini.js';
+import { getLanguage, isEnglish } from '../lib/languages.js';
 
 // Gemini looks at every scene's picture and writes ONE narration line per scene, so what is said always matches
 // what is on screen. Time-boxed so the function always answers (with a basic draft) instead of timing out.
@@ -23,6 +24,7 @@ interface SceneOut {
   id: string;
   sees: string;
   line: string;
+  meaning?: string;
 }
 
 const clean = (v: unknown, max: number) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : '');
@@ -74,7 +76,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const body = (req.body || {}) as { industry?: string; facts?: Fact[]; scenes?: SceneIn[] };
+    const body = (req.body || {}) as { industry?: string; facts?: Fact[]; scenes?: SceneIn[]; language?: string };
+    const lang = getLanguage(body.language); // anything not on our list becomes English
+    const english = isEnglish(lang.code);
 
     const industry = clean(body.industry, 60) || 'Marketing';
     const facts: Fact[] = (Array.isArray(body.facts) ? body.facts : [])
@@ -111,9 +115,11 @@ ${factLines}
 
 For EACH scene return:
 - "id": the scene id exactly as given.
-- "sees": a 2-5 word label of what is VISIBLY shown in that scene's picture (for example "Master bathroom", "Front view", "Pool terrace").
-- "line": the narration spoken while this scene is on screen: one or two natural sentences, about 14-28 words.
-
+- "sees": a 2-5 word label IN ENGLISH of what is VISIBLY shown in that scene's picture (for example "Master bathroom", "Front view", "Pool terrace").
+- "line": the narration spoken while this scene is on screen: one or two natural sentences, about 14-28 words${english ? '' : ` (or the equivalent length in ${lang.ai}`}${english ? '.' : ')'}.
+${english ? '' : `- "meaning": a natural English translation of "line", so the business owner can check what it says.
+LANGUAGE: write every "line" in ${lang.ai}, as a fluent native speaker would say it aloud in a marketing video. The business details above may be written in any language; use them accurately. Keep names, numbers and prices correct. Do not mix languages inside a line, except brand names.
+`}
 STRICT RULES:
 1. Each line must describe ONLY what is visible in that scene's own picture. Never mention a room, object or feature that is not visible in that picture. A bathroom picture never talks about the living room, and the other way round. The same applies to every industry (a dashboard picture never talks about the engine bay, a dessert picture never talks about the dining hall).
 2. Use the details above only where they naturally belong to what is visible: the number of bedrooms on a bedroom picture, the number of bathrooms on a bathroom picture, the size on a living room or exterior picture, engine details on an engine or exterior picture, and so on. Price, availability and contact belong in the closing scene.
@@ -155,8 +161,9 @@ STRICT RULES:
                       id: { type: Type.STRING },
                       sees: { type: Type.STRING },
                       line: { type: Type.STRING },
+                      meaning: { type: Type.STRING },
                     },
-                    required: ['id', 'sees', 'line'],
+                    required: english ? ['id', 'sees', 'line'] : ['id', 'sees', 'line', 'meaning'],
                   },
                 },
               },
@@ -181,9 +188,14 @@ STRICT RULES:
               // match by id first, fall back to position
               const hit = parsed.find((p: any) => p?.id === s.id) ?? parsed[i];
               const line = clean(hit?.line, 400);
-              return { id: s.id, sees: clean(hit?.sees, 60), line: line || basic[i].line };
+              return {
+                id: s.id,
+                sees: clean(hit?.sees, 60),
+                line: line || basic[i].line,
+                ...(english ? {} : { meaning: clean(hit?.meaning, 400) }),
+              };
             });
-            return res.status(200).json({ success: true, scenes: out, source: 'gemini' });
+            return res.status(200).json({ success: true, scenes: out, source: 'gemini', language: lang.code });
           }
         } catch {
           console.info('Narration JSON from Gemini could not be parsed; using a basic draft.');
@@ -191,7 +203,8 @@ STRICT RULES:
       }
     }
 
-    return res.status(200).json({ success: true, scenes: basicNarration(scenes, facts), source: 'basic' });
+    // The basic draft is built from the form facts only, so it is always in the language they were typed in
+    return res.status(200).json({ success: true, scenes: basicNarration(scenes, facts), source: 'basic', language: lang.code });
   } catch (err: any) {
     console.error('Narration generation error:', err);
     return res.status(500).json({ success: false, error: 'Could not write the narration. Please try again.' });

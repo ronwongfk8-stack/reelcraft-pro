@@ -85,12 +85,15 @@ export interface WrittenScene {
   id: string;
   sees: string;
   line: string;
+  /** English version of `line`, for checking a language you may not read */
+  meaning?: string;
 }
 
 export async function requestNarration(params: {
   industry: string;
   facts: Record<string, string>;
   scenes: NarrationRequestScene[];
+  language?: string;
 }): Promise<{ scenes: WrittenScene[]; source: 'gemini' | 'basic' }> {
   const res = await fetch('/api/generate-narration', {
     method: 'POST',
@@ -99,6 +102,7 @@ export async function requestNarration(params: {
       industry: params.industry,
       facts: factsToPairs(params.industry, params.facts),
       scenes: params.scenes,
+      language: params.language,
     }),
   });
   const json = await res.json().catch(() => null);
@@ -108,37 +112,119 @@ export async function requestNarration(params: {
   return { scenes: json.scenes, source: json.source === 'gemini' ? 'gemini' : 'basic' };
 }
 
-/** Breaks one spoken line into short on-screen caption phrases, timed in proportion to their length. */
-export function splitCaptionPhrases(line: string, start: number, duration: number, idPrefix: string): CaptionSegment[] {
-  const words = line.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-  if (words.length === 0) return [];
-
-  const MAX_WORDS = 7;
-  const phrases: string[] = [];
-  let cur: string[] = [];
-  for (const word of words) {
-    cur.push(word);
-    const endsClause = /[,;:.!?]$/.test(word);
-    if (cur.length >= MAX_WORDS || (endsClause && cur.length >= 3)) {
-      phrases.push(cur.join(' '));
-      cur = [];
-    }
+export async function requestTranslation(params: {
+  language: string;
+  lines: { id: string; text: string }[];
+  titles: { id: string; text: string }[];
+}): Promise<{ lines: { id: string; line: string; meaning: string }[]; titles: { id: string; text: string }[] }> {
+  const res = await fetch('/api/translate-narration', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json?.success || !Array.isArray(json.lines)) {
+    throw new Error(json?.error || `The translation service returned ${res.status}.`);
   }
-  if (cur.length) {
-    // don't leave a one-word orphan at the end
-    if (cur.length === 1 && phrases.length > 0) phrases[phrases.length - 1] += ' ' + cur[0];
-    else phrases.push(cur.join(' '));
+  return { lines: json.lines, titles: Array.isArray(json.titles) ? json.titles : [] };
+}
+
+const CLAUSE_END = /[,;:.!?，。！？；：、]$/;
+
+/**
+ * Breaks one spoken line into short on-screen caption phrases, timed in proportion to their length.
+ * Works for languages written with spaces (English, Malay, Korean, Arabic...) and without (Chinese, Japanese, Thai).
+ */
+export function splitCaptionPhrases(line: string, start: number, duration: number, idPrefix: string): CaptionSegment[] {
+  const text = line.replace(/\s+/g, ' ').trim();
+  if (!text) return [];
+
+  let phrases: string[] = [];
+  // Chinese / Japanese / Thai have no spaces between words (a "word" is a whole clause), so they are cut by length
+  const needsCharBudget = /[\u3040-\u30FF\u3400-\u9FFF\u0E00-\u0E7F]/.test(text);
+
+  if (!needsCharBudget) {
+    // Latin, Cyrillic, Arabic, Hindi, Tamil, Korean... : words are separated by spaces
+    const MAX_WORDS = /[\uAC00-\uD7AF]/.test(text) ? 5 : 7;
+    let cur: string[] = [];
+    for (const word of text.split(' ')) {
+      cur.push(word);
+      if (cur.length >= MAX_WORDS || (CLAUSE_END.test(word) && cur.length >= 3)) {
+        phrases.push(cur.join(' '));
+        cur = [];
+      }
+    }
+    if (cur.length) {
+      // don't leave a one-word orphan at the end
+      if (cur.length === 1 && phrases.length > 0) phrases[phrases.length - 1] += ' ' + cur[0];
+      else phrases.push(cur.join(' '));
+    }
+  } else {
+    const MAX_CHARS = /[\u0E00-\u0E7F]/.test(text) ? 26 : 14;
+    const SLACK = 4; // a phrase may run a little long to end on punctuation instead of mid-sentence
+    const Seg: any = typeof Intl !== 'undefined' ? (Intl as any).Segmenter : undefined;
+    const hasScript = (c: string) => /[\u3040-\u30FF\u3400-\u9FFF\u0E00-\u0E7F]/.test(c);
+
+    // tokens: whole chunks for spaced words, dictionary words for unspaced scripts, spaces kept so the text is preserved
+    const tokens: string[] = [];
+    text.split(/(\s+)/).forEach((chunk) => {
+      if (!chunk) return;
+      if (!/\s/.test(chunk) && hasScript(chunk) && chunk.length > 1) {
+        let parts: string[] = Array.from(chunk);
+        if (Seg) {
+          try {
+            const segs = Array.from(new Seg(undefined, { granularity: 'word' }).segment(chunk)).map((x: any) => x.segment as string);
+            if (segs.length > 0) parts = segs;
+          } catch {
+            /* single characters */
+          }
+        }
+        tokens.push(...parts);
+      } else {
+        tokens.push(chunk);
+      }
+    });
+
+    let cur = '';
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i];
+      cur += tok;
+      const trimmed = cur.trim();
+      if (CLAUSE_END.test(tok.trim()) && trimmed.length >= 4) {
+        phrases.push(trimmed);
+        cur = '';
+      } else if (trimmed.length >= MAX_CHARS) {
+        let look = '';
+        let found = false;
+        for (let j = i + 1; j < tokens.length && look.length + tokens[j].length <= SLACK; j++) {
+          look += tokens[j];
+          if (CLAUSE_END.test(tokens[j].trim())) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          phrases.push(trimmed);
+          cur = '';
+        }
+      }
+    }
+    const rest = cur.trim();
+    if (rest) {
+      if (rest.length <= 2 && phrases.length > 0) phrases[phrases.length - 1] += rest;
+      else phrases.push(rest);
+    }
   }
 
   const totalChars = phrases.reduce((n, p) => n + p.length, 0) || 1;
   let t = start;
-  return phrases.map((text, i) => {
-    const span = (text.length / totalChars) * duration;
+  return phrases.map((p, i) => {
+    const span = (p.length / totalChars) * duration;
     const seg: CaptionSegment = {
       id: `${idPrefix}-${i}`,
       startTime: Number(t.toFixed(2)),
       endTime: Number((i === phrases.length - 1 ? start + duration : t + span).toFixed(2)),
-      text,
+      text: p,
     };
     t += span;
     return seg;

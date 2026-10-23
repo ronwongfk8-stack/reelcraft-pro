@@ -30,6 +30,8 @@ export interface GeminiVoicePersona {
 interface SynthesizeParams {
   text: string;
   voice: GeminiVoicePersona;
+  /** e.g. "Simplified Chinese (Mandarin, simplified characters)". Left out for English, so English output is unchanged. */
+  language?: string;
 }
 
 interface SynthesizeResult {
@@ -93,7 +95,7 @@ async function discoverTtsModels(ai: GoogleGenAI): Promise<string[]> {
   return found;
 }
 
-export async function synthesizeGeminiVoiceover({ text, voice }: SynthesizeParams): Promise<SynthesizeResult> {
+export async function synthesizeGeminiVoiceover({ text, voice, language }: SynthesizeParams): Promise<SynthesizeResult> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('Voiceover generation is not configured on this server (missing GEMINI_API_KEY).');
@@ -108,7 +110,11 @@ export async function synthesizeGeminiVoiceover({ text, voice }: SynthesizeParam
   // documented mechanism for steering delivery (tone, pace, energy) since
   // there's no separate numeric pitch/rate parameter. The model performs
   // only the instructed speech, it doesn't read the instruction aloud.
-  const styledText = `Say the following in a ${voice.tone.toLowerCase()} voice: ${text}`;
+  // For other languages the language is named too, which keeps pronunciation and script (e.g. Simplified vs
+  // Traditional Chinese) right even when the text alone is ambiguous.
+  const styledText = language
+    ? `Say the following in ${language}, in a ${voice.tone.toLowerCase()} voice: ${text}`
+    : `Say the following in a ${voice.tone.toLowerCase()} voice: ${text}`;
 
   // Which TTS model to use: an override from the environment (GEMINI_TTS_MODEL), then the model this app was built
   // with. Preview models get renamed or retired over time, so if Google reports the model as missing we look up

@@ -327,6 +327,18 @@ export function Studio({
     });
   };
 
+  // Translated on-screen titles replace the titles of the same scenes
+  const handleApplyTitles = (titles: Record<string, string>, languageCode: string) => {
+    setProject((prev) => ({
+      ...prev,
+      clips: prev.clips.map((c) =>
+        c.textOverlay && titles[c.id]
+          ? { ...c, textOverlay: { ...c.textOverlay, text: titles[c.id].toLocaleUpperCase(languageCode) } }
+          : c
+      ),
+    }));
+  };
+
   const openNarration = () => {
     if (mediaItems.length === 0 || project.clips.length === 0) {
       showToast('Add your photos or videos first, then create the voiceover.', 'info');
@@ -839,6 +851,7 @@ export function Studio({
         defaultVoiceId={voicePersona}
         onChange={setNarration}
         onApply={handleApplyNarration}
+        onApplyTitles={handleApplyTitles}
       />
 
       <SideControlPanel

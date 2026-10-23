@@ -485,7 +485,8 @@ class WebAudioEngine {
   private async fetchVoiceChunk(
     chunk: string,
     voice: { id: string; gender: string; tone: string },
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    language?: string
   ): Promise<{ pcm: Uint8Array; sampleRate: number }> {
     let lastError = '';
     let rateLimited = false;
@@ -496,7 +497,7 @@ class WebAudioEngine {
         const res = await fetch('/api/voiceover/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: chunk, voiceId: voice.id, gender: voice.gender, tone: voice.tone }),
+          body: JSON.stringify({ text: chunk, voiceId: voice.id, gender: voice.gender, tone: voice.tone, language }),
           signal,
         });
         const json = await res.json().catch(() => null);
@@ -520,14 +521,15 @@ class WebAudioEngine {
   private async fetchVoicePcm(
     text: string,
     voice: { id: string; gender: string; tone: string },
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    language?: string
   ): Promise<{ pcm: Uint8Array; sampleRate: number }> {
     const chunks = splitForTts(text, 500);
     if (chunks.length === 0) throw new Error('Please enter a narration script first.');
     const parts: Uint8Array[] = [];
     let sampleRate = 24000;
     for (const chunk of chunks) {
-      const piece = await this.fetchVoiceChunk(chunk, voice, signal);
+      const piece = await this.fetchVoiceChunk(chunk, voice, signal, language);
       sampleRate = piece.sampleRate;
       parts.push(piece.pcm);
     }
@@ -547,9 +549,10 @@ class WebAudioEngine {
 
   public async generateVoiceoverAudio(
     text: string,
-    voiceId = 'male-marcus'
+    voiceId = 'male-marcus',
+    language?: string
   ): Promise<{ url: string; duration: number; blob: Blob }> {
-    const { pcm, sampleRate } = await this.fetchVoicePcm(text, this.resolveVoice(voiceId));
+    const { pcm, sampleRate } = await this.fetchVoicePcm(text, this.resolveVoice(voiceId), undefined, language);
     const blob = new Blob([buildWav(pcm, sampleRate)], { type: 'audio/wav' });
     return { url: URL.createObjectURL(blob), duration: pcm.length / (sampleRate * 2), blob };
   }
@@ -570,6 +573,7 @@ class WebAudioEngine {
       firstLeadIn?: number;
       gap?: number;
       minScene?: number;
+      language?: string;
     } = {}
   ): Promise<{
     url: string;
@@ -577,7 +581,7 @@ class WebAudioEngine {
     duration: number;
     scenes: { sceneStart: number; sceneDuration: number; voiceStart: number; voiceDuration: number }[];
   }> {
-    const { onProgress, signal, concurrency = 1, leadIn = 0.25, firstLeadIn = 0.4, gap = 0.4, minScene = 2.5 } = opts;
+    const { language, onProgress, signal, concurrency = 1, leadIn = 0.25, firstLeadIn = 0.4, gap = 0.4, minScene = 2.5 } = opts;
     const voice = this.resolveVoice(voiceId);
     if (lines.length === 0) throw new Error('There are no scenes to voice.');
 
@@ -592,7 +596,7 @@ class WebAudioEngine {
         const i = next++;
         if (i >= lines.length) return;
         try {
-          results[i] = await this.fetchVoicePcm(lines[i], voice, signal);
+          results[i] = await this.fetchVoicePcm(lines[i], voice, signal, language);
           done++;
           onProgress?.(done, lines.length);
         } catch (e: any) {
